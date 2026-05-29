@@ -427,7 +427,7 @@ static void parse_command_line(int argc, char *argv[]) {
   mcsat_nta_delta = -1;
   mcsat_partial_restart = false;
   mcsat_bool_freq = 0.3;
-  mcsat_div_neq0 = false;
+  mcsat_div_neq0 = true;
   mcsat_no_sin_period = false;
 
   init_pvector(&trace_tags, 5);

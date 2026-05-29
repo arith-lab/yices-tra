@@ -2899,7 +2899,13 @@ void mcsat_solve(mcsat_solver_t* mcsat, const param_t *params, model_t* mdl, uin
     mcsat->nta_info.delta_mode = true;
     mcsat->nta_info.delta = mcsat->ctx->mcsat_options.nta_delta;
   } else {
-    mcsat->nta_info.delta_mode = false;
+    /* Enable delta mode internally even when the user did not set it.
+     * If the solver would return delta-sat, it will instead double the delta
+     * and restart.  */
+    mcsat->nta_info.delta_mode = true;
+    mcsat->nta_info.delta = mcsat->ctx->mcsat_options.nta_delta;
+    mcsat->nta_info.delta_used = false;
+    int_hset_reset(&mcsat->nta_info.delta_used_constraints);
   }
   mcsat->nta_info.use_period_for_sin = !mcsat->ctx->mcsat_options.no_sin_period;
 
@@ -2988,6 +2994,19 @@ void mcsat_solve(mcsat_solver_t* mcsat, const param_t *params, model_t* mdl, uin
     }
 
     // Nothing to decide, we're satisfiable
+    // If delta mode was used internally (user did not set delta_mode), refine
+    // by doubling the delta and restarting instead of returning delta-sat.
+    if (!mcsat->ctx->mcsat_options.nta_delta_set && delta_used_in_trail(mcsat->trail)) {
+      mcsat->nta_info.delta = mcsat->nta_info.delta * 2;
+      mcsat->nta_info.delta_used = false;
+      // print restarting with delta
+      if (trace_enabled(mcsat->ctx->trace, "mcsat::nta::restart")) {
+        mcsat_trace_printf(mcsat->ctx->trace, "restarting with delta = %d\n", mcsat->nta_info.delta);
+      }
+      int_hset_reset(&mcsat->nta_info.delta_used_constraints);
+      mcsat_request_restart(mcsat);
+      continue;
+    }
     mcsat->status = YICES_STATUS_SAT;
     if (trace_enabled(mcsat->ctx->trace, "mcsat::model::check")) {
       mcsat_check_model(mcsat, true);

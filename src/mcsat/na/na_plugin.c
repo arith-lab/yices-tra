@@ -1652,7 +1652,6 @@ static bool na_plugin_check_nta_consistency(na_plugin_t* na, trail_token_t* prop
       prop->add_at_level(prop, refinement_var, &true_value, na->ctx->trail->decision_level_base);
       //prop->lemma(prop, refinement_var);
     }
-    mcsat_value_destruct(&true_value);
 
     // Record only refinement literals for conflict analysis
     for (uint32_t i = 0; i < refinement_literals.size; i++) {
@@ -1662,15 +1661,29 @@ static bool na_plugin_check_nta_consistency(na_plugin_t* na, trail_token_t* prop
       //   ivector_push(&na->conflict_refinement_lemmas, refinement_literal);
       // }
       //na_plugin_propagate_nta_literal(na, prop, refinement_literal);
-      variable_t refinement_literal_var = variable_db_get_variable(na->ctx->var_db, refinement_literals.data[i]);
+      if (ctx_trace_enabled(na->ctx, "na::nta")) {
+        ctx_trace_printf(na->ctx, "Refinement_literal: ");
+        ctx_trace_term(na->ctx, refinement_literal);
+      }
+
+      mcsat_value_t* truth_value = &true_value;
+      if(!is_pos_term(refinement_literal)){
+        truth_value = &false_value;
+        refinement_literal = opposite_term(refinement_literal);
+      }
+
+      variable_t refinement_literal_var = variable_db_get_variable(na->ctx->var_db, (refinement_literal));
       na_plugin_track_added_lemma(na, refinement_literal_var);
-      na_plugin_register_lp_variables_for_term(na, refinement_literals.data[i]);
-      prop->add_at_level(prop, refinement_literal_var, &true_value, na->ctx->trail->decision_level_base);
+      na_plugin_register_lp_variables_for_term(na, refinement_literal);
+      prop->add_at_level(prop, refinement_literal_var, truth_value, na->ctx->trail->decision_level_base);
   
       ivector_push(&na->conflict_refinement_lemmas, refinement_literal);
     }
     delete_ivector(&refinements);
     delete_ivector(&refinement_literals);
+
+    mcsat_value_destruct(&true_value);
+    mcsat_value_destruct(&false_value);
 
     // Set the conflict variable (a real-valued sin variable) and signal conflict
     if (conflict_var != variable_null) {
