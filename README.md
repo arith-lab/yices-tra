@@ -1,15 +1,14 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-# Yices-NTA
+# Yices-TRA
 
-This repository contains the first iteration of the tool Yices-NTA, 
-a tool for solving Non-Linear Transcendental Arithmetic (NTA).
+This repository contains the first iteration of the tool Yices-TRA, 
+a tool for solving Transcendental Real Arithmetics (TRA).
 The tool is based on the 
 [Satisfiability Modulo Theories](https://en.wikipedia.org/wiki/Satisfiability_modulo_theories) (SMT) solver 
 [Yices2](https://github.com/SRI-CSL/yices2). 
 
-The repository at [github.com/nta-labs/experimental-evaluation-feb26](https://github.com/nta-labs/experimental-evaluation-feb26)
-Contains an experimental evaluation of the tool.
+Contains an experimental evaluation of the tool is available [here](https://cloud.software.imdea.org/index.php/s/PgqwRYckKrLXT4q).
 
 # Installation (Unix systems)
 
@@ -94,6 +93,6 @@ internal computations performed by the tool.
 
 # Diff with Yices2 
 
-The commit [5a55cdb8](https://github.com/nta-labs/yices-nta/commit/5a55cdb8408ba82958e39a5c08313df697d59fff)
-applies all updates needed to extend Yices2 to Yices-NTA. You can 
+The commit [5a55cdb8](https://github.com/arith-lab/yices-tra/commit/5a55cdb8408ba82958e39a5c08313df697d59fff)
+applies all updates needed to extend Yices2 to Yices-TRA. You can 
 inspect the differences between the two tools by inspecting that commit.
