@@ -1179,7 +1179,7 @@ smt2_term_stack.c          several operations to follow the SMT-LIB 2.0 conventi
 smt2_commands.h:           Commands defined in SMT-LIB 2.0 (not complete yet)
 smt2_commands.c
 
-yices_smt2.c:		   Solver for problems in the SMT-LIB 2.0 notation
+ytra.c:		   Solver for problems in the SMT-LIB 2.0 notation
 
 
 

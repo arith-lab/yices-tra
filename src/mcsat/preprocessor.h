@@ -21,20 +21,24 @@
 #include "utils/int_vectors.h"
 #include "utils/int_hash_map.h"
 #include "io/tracer.h"
+#include "api/smt_logic_codes.h"
 #include "options.h"
 #include "mcsat/utils/scope_holder.h"
-
-#include "mcsat/nta_info.h"
+#include "mcsat/variable_db.h"
 
 #include <setjmp.h>
 
 #ifndef MCSAT_PREPROCESSOR_H_
 #define MCSAT_PREPROCESSOR_H_
 
-typedef struct preprocessor_s {
+typedef struct {
 
   /** Term table */
   term_table_t* terms;
+
+  /** Variable database (read only): a variable that already has an MCSAT variable, for example
+   *  one kept from a popped scope, is not solved as a first-time variable */
+  const variable_db_t* var_db;
 
   /** Term manager */
   term_manager_t tm;
@@ -42,14 +46,44 @@ typedef struct preprocessor_s {
   /** Map from terms to their preprocessed version */
   int_hmap_t preprocess_map;
 
-  /** Inverse map from preprocessed terms to original terms */
-  int_hmap_t preprocess_inverse_map;
-
   /** List of terms in the preprocess map (for backtracking) */
   ivector_t preprocess_map_list;
 
+  /** Map from term to tuple-blast data offset */
+  int_hmap_t tuple_blast_map;
+
+  /** Packed tuple-blast data: [size, terms...] */
+  ivector_t tuple_blast_data;
+
+  /** Terms with tuple-blast entries (for backtracking) */
+  ivector_t tuple_blast_list;
+
+  /** Original uninterpreted atoms that were tuple-blasted */
+  ivector_t tuple_blast_atoms;
+
+  /** Memoization: type -> 0/1 for type_is_tuple_free.
+   * Keyed by type_t (always >= 0). The cache is reset by
+   * preprocessor_gc_mark before every GC sweep, because Yices recycles
+   * type IDs once the originals are freed -- a stale entry under a
+   * recycled ID would misclassify a fresh type. Between GCs, type IDs
+   * are stable, so no other invalidation is needed. */
+  int_hmap_t type_is_tuple_free_cache;
+
+  /** Memoization: type -> leaf count for type_leaf_count.
+   * Same lifetime / GC-reset argument as type_is_tuple_free_cache. */
+  int_hmap_t type_leaf_count_cache;
+
+  /** Memoization: term-index -> 0/1 for "DAG rooted at term contains any
+   * tuple type". Polarity-insensitive (key = index_of(t)). Reset by
+   * preprocessor_gc_mark for the same reason as the type caches: term
+   * IDs are recycled across GC. Between GCs, term IDs are stable. */
+  int_hmap_t term_has_tuples_cache;
+
   /** Purification map, term to its variable */
   int_hmap_t purification_map;
+
+  /** Inverse purification map, fresh variable to its original term */
+  int_hmap_t purification_inverse_map;
 
   /** List of term in the purification map (for backtracking) */
   ivector_t purification_map_list;
@@ -66,11 +100,11 @@ typedef struct preprocessor_s {
   /** Tracer */
   tracer_t* tracer;
 
-  /** Pointer to the global nta_info (same instance as in solver) */
-  nta_info_t* nta_info;
-
   /** MCSAT options */
   const mcsat_options_t* options;
+
+  /** Logic being solved: it decides which symbols the plugins interpret */
+  smt_logic_t logic;
 
   /** Exception handler */
   jmp_buf* exception;
@@ -81,7 +115,7 @@ typedef struct preprocessor_s {
 } preprocessor_t;
 
 /** Construct the preprocessor */
-void preprocessor_construct(preprocessor_t* pre, term_table_t* terms, jmp_buf* handler, const mcsat_options_t* options);
+void preprocessor_construct(preprocessor_t* pre, term_table_t* terms, const variable_db_t* var_db, jmp_buf* handler, const mcsat_options_t* options, smt_logic_t logic);
 
 /** Destruct the preprocessor */
 void preprocessor_destruct(preprocessor_t* pre);
@@ -89,17 +123,20 @@ void preprocessor_destruct(preprocessor_t* pre);
 /** Preprocess the term, add any additional assertions to output vector. */
 term_t preprocessor_apply(preprocessor_t* pre, term_t t, ivector_t* out, bool is_assertion);
 
-/** Get preprocessed term if present, or NULL_TERM otherwise. */
-term_t preprocessor_get(preprocessor_t* pre, term_t t);
+/** The term that x stands for if x is a variable introduced by preprocessor_purify,
+ *  and NULL_TERM otherwise. */
+term_t preprocessor_purification_definition(const preprocessor_t* pre, term_t x);
 
-/** Get original term mapped to t_pre, or NULL_TERM otherwise. */
-term_t preprocessor_get_inverse(preprocessor_t* pre, term_t t_pre);
+/*
+ * Tuple-blast term t and copy its flattened leaves into out.
+ * - out is reset first.
+ * - leaf order matches type_collect_blasted_atom_types/type leaf order.
+ * - leaves are memoized and stable across later tuple-blast calls.
+ */
+void preprocessor_tuple_blast(preprocessor_t* pre, term_t t, ivector_t* out);
 
 /** Set tracer */
 void preprocessor_set_tracer(preprocessor_t* pre, tracer_t* tracer);
-
-/** Set pointer to the NTA info structure (from solver) */
-void preprocessor_set_nta_info(preprocessor_t* pre, nta_info_t* nta_info);
 
 /** Set the exception handler */
 void preprocessor_set_exception_handler(preprocessor_t* pre, jmp_buf* handler);
@@ -112,6 +149,9 @@ void preprocessor_pop(preprocessor_t* pre);
 
 /** Add any variable substitutions to the model */
 void preprocessor_build_model(preprocessor_t* pre, model_t* model);
+
+/** Replace tuple-blasted leaf variables in t by accessors over original tuple atoms */
+term_t preprocessor_unblast_term(preprocessor_t* pre, term_t t);
 
 /** Mark all the terms in the preprocessor */
 void preprocessor_gc_mark(preprocessor_t* pre);

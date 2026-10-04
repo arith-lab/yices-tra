@@ -1,50 +1,19 @@
-Source: yices2
-Maintainer: Ahmed Irfan <ahmed.irfan@sri.com>
+Source: yices-tra
+Maintainer: Alessio Mansutti <alessio.mansutti@imdea.org>
 Section: misc
 Priority: optional
 Standards-Version: 3.9.8
-Build-Depends: debhelper (>= 9), dh-autoreconf (>= 10), gperf, libgmp-dev, libpoly-dev, cudd, cadical, dh-exec
-Homepage: http://yices.csl.sri.com/
+Build-Depends: debhelper (>= 9), dh-autoreconf (>= 10), gperf, libgmp-dev, libpoly-dev, cudd, libflint-dev (>= 3.0), libmpfr-dev
+Homepage: https://github.com/arith-lab/yices-tra
 
 
-Package: libyices2.7
+Package: yices-tra
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Pre-Depends: ${misc:Pre-Depends}
-Multi-Arch: same
-Description:  Yices SMT Solver API Library
- SRI International's Satisfiability Modulo Theory Solver.
+Description: SMT solver for real arithmetic with transcendental functions
+ YicesTRA decides the satisfiability of quantifier-free formulas of
+ non-linear real arithmetic extended with the transcendental functions
+ sin and exp, and the constant pi. It is an extension of the Yices 2
+ SMT solver of SRI International.
  .
- A library to use the Yices API.
-
-
-Package: yices2
-Architecture: any
-Depends:  gperf, libgmp-dev,  libpoly-dev (>= 1.4), ${shlibs:Depends}, ${misc:Depends}
-Description: Yices SMT Solver
- SRI International's Satisfiability Modulo Theory Solver.
- .
- The package contains several variants of the Yices 2 SMT
- solver that support different input languages, including
- SMT-LIB and the Yices language.
-
-Package: yices2-dev
-Section: libdevel
-Architecture: any
-Depends: yices2,  libyices2.7 (= ${binary:Version}), ${misc:Depends}, libgmp-dev
-Description: Yices SMT Solver API Support
- SRI International's Satisfiability Modulo Theory Solver.
- .
- Development headers for the Yices API.
-
-
-Package: yices2-dbg
-Section: debug
-Priority: extra
-Architecture: any
-Depends: yices2, libyices2.7 (= ${binary:Version}), ${misc:Depends}
-Provides: yices2-dbg
-Description: Yices SMT Solver
- SRI International's Satisfiability Modulo Theory Solver.
- .
- Debugging symbols for Yices 2.
+ The package contains the solver ytra, which reads the SMT-LIB 2 format.

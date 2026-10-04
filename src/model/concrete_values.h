@@ -54,6 +54,7 @@
 #include "terms/rationals.h"
 #include "terms/types.h"
 #include "utils/bitvectors.h"
+#include "utils/int_hash_map.h"
 #include "utils/int_hash_tables.h"
 #include "utils/int_queues.h"
 #include "utils/int_vectors.h"
@@ -315,8 +316,8 @@ typedef const char *(*unint_namer_fun_t)(void *aux, value_unint_t *d);
  * To be consistent with the Yices semantics of idiv/mod, the expected
  * types should be:
  *   rdiv_by_zero: [ real -> real ]
- *   idiv_by_zero: [ real -> int  ]
- *   imod_by_zero: [ real -> real ]
+ *   idiv_by_zero: [ int  -> int  ]
+ *   imod_by_zero: [ int  -> int  ]
  *
  * But, we don't enforce this here. Any function that maps an
  * arithmetic type to an arithmetic type is accepted.
@@ -333,6 +334,7 @@ typedef struct value_table_s {
   uint32_t nobjects;
   uint8_t *kind;
   value_desc_t *desc;
+  type_t *type_cache;
   byte_t *canonical; // bitvector
 
   type_table_t *type_table;
@@ -357,6 +359,18 @@ typedef struct value_table_s {
   void *aux_namer;
   unint_namer_fun_t unint_namer;
 } value_table_t;
+
+
+/*
+ * Copier for values stored in one value table into another value table.
+ * - src and dst must use the same type table
+ * - cache maps source value ids to destination value ids
+ */
+typedef struct vtbl_copy_s {
+  value_table_t *src;
+  value_table_t *dst;
+  int_hmap_t cache;
+} vtbl_copy_t;
 
 
 #define DEF_VALUE_TABLE_SIZE 200
@@ -385,6 +399,20 @@ extern void delete_value_table(value_table_t *table);
  * Reset: empty the table
  */
 extern void reset_value_table(value_table_t *table);
+
+
+/*
+ * Initialize/delete a value-table copier.
+ */
+extern void init_vtbl_copy(vtbl_copy_t *copy, value_table_t *src, value_table_t *dst);
+extern void delete_vtbl_copy(vtbl_copy_t *copy);
+
+/*
+ * Copy value v from copy->src to copy->dst.
+ * - v must be a valid object in copy->src
+ * - the returned value is a valid object in copy->dst
+ */
+extern value_t vtbl_copy_value(vtbl_copy_t *copy, value_t v);
 
 
 /*
@@ -545,7 +573,8 @@ extern value_t vtbl_mk_constant_function(value_table_t *table, type_t tau, value
 extern void vtbl_set_zero_rdiv(value_table_t *table, value_t f);
 
 /*
- * Same thing for the integer divide-by-zero and modulo
+ * Same thing for the integer divide-by-zero and modulo:
+ * - f must be a value in table of type [int -> int]
  */
 extern void vtbl_set_zero_idiv(value_table_t *table, value_t f);
 extern void vtbl_set_zero_mod(value_table_t *table, value_t f);
@@ -553,7 +582,8 @@ extern void vtbl_set_zero_mod(value_table_t *table, value_t f);
 
 /*
  * Set a default interpretation for the divide-by-zero functions.
- * The default is (rdiv x 0) = 0  (idiv x 0) = 0 and (mod x 0) = 0 for all real x.
+ * The default is (rdiv x 0) = 0 for all real x, and
+ * (idiv x 0) = 0 and (mod x 0) = 0 for all integer x.
  * - if any of the zero_div function is already assigned, it is kept.
  */
 extern void vtbl_set_default_zero_divide(value_table_t *table);
@@ -970,6 +1000,13 @@ static inline value_update_t *vtbl_update(value_table_t *table, value_t v) {
   return (value_update_t *) table->desc[v].ptr;
 }
 
+/*
+ * Get the most specific type known for value v.
+ * - returns NULL_TYPE if no type can be inferred (e.g., UNKNOWN/MAP value).
+ * - result is cached in table->type_cache.
+ */
+extern type_t vtbl_value_type(value_table_t *table, value_t v);
+
 
 /*
  * Check whether v is zero:
@@ -1014,6 +1051,24 @@ extern bool is_bvzero(value_table_t *table, value_t v);
  * - hset1->nelems = number of mappings in hset1->data
  */
 extern void vtbl_expand_update(value_table_t *table, value_t i, value_t *def, type_t *tau);
+
+
+/*
+ * Expand update c and return a private copy of the resulting mapping list.
+ *
+ * vtbl_expand_update uses table->hset1 as scratch space, which is shared
+ * across the table and not reentrant: if a caller iterates over the
+ * expansion while recursively printing or expanding a different update, the
+ * second expansion clobbers hset1 mid-iteration. This helper copies the map
+ * ids into a private array that the caller owns, removing the hazard.
+ *
+ * Outputs:
+ * - *def, *tau are written by the underlying vtbl_expand_update.
+ * - *n is set to the number of mappings.
+ * - returns NULL when *n == 0; otherwise returns a fresh array of length *n
+ *   that the caller must free with safe_free.
+ */
+extern value_t *vtbl_copy_update_maps(value_table_t *table, value_t c, value_t *def, type_t *tau, uint32_t *n);
 
 /*
  * Get the type of a function or update object i

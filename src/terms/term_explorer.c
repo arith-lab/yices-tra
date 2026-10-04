@@ -143,7 +143,7 @@ static const term_constructor_t constructor_term_table[NUM_TERM_KINDS] = {
   YICES_CONSTRUCTOR_ERROR,  // RESERVED_TERM
   YICES_SCALAR_CONSTANT,    // CONSTANT_TERM
   YICES_ARITH_CONSTANT,     // ARITH_CONSTANT
-  YICES_ARITH_FF_CONSTANT,  // ARITH_FF_CONSTANT
+  YICES_FF_CONSTANT,        // ARITH_FF_CONSTANT
   YICES_BV_CONSTANT,        // BV64_CONSTANT
   YICES_BV_CONSTANT,        // BV_CONSTANT
   YICES_VARIABLE,           // VARIABLE
@@ -189,7 +189,7 @@ static const term_constructor_t constructor_term_table[NUM_TERM_KINDS] = {
   YICES_BIT_TERM,           // BIT_TERM
   YICES_POWER_PRODUCT,      // POWER_PRODUCT
   YICES_ARITH_SUM,          // ARITH_POLY
-  YICES_ARITH_FF_SUM,       // ARITH_FF_POLY
+  YICES_FF_SUM,             // ARITH_FF_POLY
   YICES_BV_SUM,             // BV64_POLY
   YICES_BV_SUM,             // BV_POLY
 };
@@ -449,6 +449,15 @@ term_t term_child(term_table_t *table, term_t t, uint32_t i) {
       }
       break;
 
+    case ARITH_FF_EQ_ATOM:
+      assert(i < 2);
+      if (i == 0) {
+        result = arith_ff_eq_arg(table, t);
+      } else {
+        result = ff_zero_term(table, term_type(table, arith_ff_eq_arg(table, t)));
+      }
+      break;
+
     case ARITH_IS_INT_ATOM:
     case ARITH_FLOOR:
     case ARITH_CEIL:
@@ -476,6 +485,48 @@ term_t term_child(term_table_t *table, term_t t, uint32_t i) {
 
 
 /*
+ * i-th subterm of t (see header): like term_child, but also supports the
+ * arithmetic/bitvector sums, products, and projections that term_num_children
+ * counts. Reads their components straight from the descriptor (no coefficient
+ * is materialized). Returns NULL_TERM for a sum's constant monomial.
+ */
+term_t term_ith_subterm(term_table_t *table, term_t t, uint32_t i) {
+  term_t v;
+
+  assert(good_term(table, t) && i < term_num_children(table, t));
+
+  if (is_neg_term(t)) {
+    return term_child(table, t, i); // (not u): a single child u
+  }
+
+  switch (term_kind(table, t)) {
+  case ARITH_POLY:
+    v = poly_term_desc(table, t)->mono[i].var;
+    break;
+  case ARITH_FF_POLY:
+    v = finitefield_poly_term_desc(table, t)->mono[i].var;
+    break;
+  case BV64_POLY:
+    v = bvpoly64_term_desc(table, t)->mono[i].var;
+    break;
+  case BV_POLY:
+    v = bvpoly_term_desc(table, t)->mono[i].var;
+    break;
+  case POWER_PRODUCT:
+    return pprod_term_desc(table, t)->prod[i].var;
+  case SELECT_TERM:
+  case BIT_TERM:
+    return proj_term_arg(table, t);
+  default:
+    return term_child(table, t, i);
+  }
+
+  // sums store their constant with variable const_idx: no subterm to recurse into
+  return (v == const_idx) ? NULL_TERM : v;
+}
+
+
+/*
  * All children of t:
  * - t must be a valid term in table
  * - t must be a composite term
@@ -498,6 +549,12 @@ void get_term_children(term_table_t *table, term_t t, ivector_t *v) {
       // treat them like binary terms
       ivector_push(v, arith_atom_arg(table, t));
       ivector_push(v, zero_term);
+      break;
+
+    case ARITH_FF_EQ_ATOM:
+      // t == 0 over finite fields: expose both sides uniformly
+      ivector_push(v, arith_ff_eq_arg(table, t));
+      ivector_push(v, ff_zero_term(table, term_type(table, arith_ff_eq_arg(table, t))));
       break;
 
     case ARITH_IS_INT_ATOM:
@@ -684,4 +741,3 @@ int32_t generic_const_value(term_table_t *table, term_t t) {
   assert(is_pos_term(t) && t != true_term);
   return constant_term_index(table, t);
 }
-

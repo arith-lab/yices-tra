@@ -1,0 +1,10 @@
+unsat
+sat
+((define-fun x () Real (/ 1 2))
+ (define-fun y () Real 0.0))
+sat
+((define-fun x () Real (/ 1 2))
+ (define-fun y () Real (/ 3 2)))
+sat
+((define-fun x () Real (/ 1 2))
+ (define-fun y () Real 0.0))

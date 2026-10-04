@@ -64,6 +64,84 @@ Model Construction
    state. Future operations on *ctx* (including deleting or resetting
    *ctx*) do not change the model.
 
+.. c:function:: model_t* yices_new_model(void)
+
+   Builds an empty model.
+
+   This function constructs a model with no term assignments and returns a
+   pointer to it. The model must be deleted when it is no longer used by
+   calling :c:func:`yices_free_model`.
+
+   Since Yices 2.6.4.
+
+
+.. c:function:: model_t* yices_model_clone(model_t *src)
+
+   Builds a representation-preserving clone of model *src*.
+
+   The result is a fresh model with its own value storage. Explicit term
+   bindings, aliases/substitutions, and explicit division-by-zero
+   interpretations are copied. The source model is not modified.
+
+   The returned model must be deleted when it is no longer used by calling
+   :c:func:`yices_free_model`.
+
+   Since Yices 2.8.0.
+
+
+.. c:function:: model_t* yices_model_project(model_t *src, uint32_t n, const term_t domain[])
+
+   Builds a new model by projecting *src* onto a caller-provided domain.
+
+   **Parameters**
+
+   - *src*: source model
+
+   - *n*: number of terms in *domain*
+
+   - *domain*: array of *n* positive uninterpreted terms
+
+   The returned model contains concrete bindings for exactly the selected
+   terms. Each selected term is evaluated in *src* using normal model
+   evaluation, then the resulting value is copied into the returned model.
+   The selected terms do not have to be explicitly defined in *src* if normal
+   evaluation can compute their values. Aliases/substitutions and explicit
+   division-by-zero interpretations are not copied. The source model is not
+   modified.
+
+   The array *domain* must not contain duplicates. If *n* is zero, *domain*
+   may be :c:macro:`NULL`; the result is an empty model.
+
+   **Returns**
+
+   - the projected model on success
+   - :c:macro:`NULL` on error
+
+   **Error report**
+
+   - If *domain* is :c:macro:`NULL` and *n* is nonzero, or if any element of
+     *domain* is not a valid term:
+
+     -- error code: :c:enum:`INVALID_TERM`
+
+   - If any element of *domain* is not a positive uninterpreted term:
+
+     -- error code: :c:enum:`MDL_UNINT_REQUIRED`
+
+   - If *domain* contains duplicates:
+
+     -- error code: :c:enum:`MDL_DUPLICATE_VAR`
+
+   - If evaluation of a selected term fails:
+
+     -- error code: one of the evaluation errors listed in
+        :ref:`model-term-value`
+
+   The returned model must be deleted when it is no longer used by calling
+   :c:func:`yices_free_model`.
+
+   Since Yices 2.8.0.
+
 
 .. c:function:: model_t* yices_model_from_map(uint32_t n, const term_t var[], const term_t map[])
 
@@ -161,18 +239,43 @@ Model Construction
    These terms will not be defined in model *m* and will not be stored in
    vector *v*.
 
+   Term names are not relevant: named and unnamed uninterpreted terms are
+   collected the same way. A term is collected if it is explicitly defined by
+   the model, either as a stored binding or as an alias/substitution-domain
+   term. Terms that are merely evaluable by default completion are not added to
+   this vector.
+
+
+.. c:function::  model_t* yices_new_model(void)
+
+   Creates an empty model.
+
+   Returns a pointer to a fresh model with no variable assignments.
+   Values can then be assigned using the model-construction functions
+   (e.g., :c:func:`yices_model_set_bool`, :c:func:`yices_model_set_int32`).
+
+   This function always succeeds and returns a non-NULL pointer.
+
+   The model must be deleted when no longer needed by calling
+   :c:func:`yices_free_model`.
+
+   *Since 2.6.4.*
 
 .. c:function::  void yices_free_model(model_t* mdl)
 
    Deletes a model.
 
    This function deletes model *mdl*, which must be a pointer returned
-   by either :c:func:`yices_get_model` or :c:func:`yices_model_from_map`.
+   by :c:func:`yices_get_model`, :c:func:`yices_model_from_map`,
+   :c:func:`yices_new_model`, :c:func:`yices_model_clone`, or
+   :c:func:`yices_model_project`.
 
    .. note:: If this function is not called, Yices will automatically free
              the model on a call to :c:func:`yices_exit` or :c:func:`yices_reset`.
 
 
+
+.. _model-term-value:
 
 Value of a Term in a Model
 --------------------------
@@ -220,7 +323,26 @@ Model Assignment
 ----------------
 
 The following functions allow assigning values to uninterpreted terms in a model.
-These functions are useful for creating custom models or modifying existing ones.
+These functions are useful for creating custom models or extending existing
+ones. The term-binding model-setter functions in this section are append-only:
+they fail if the selected uninterpreted term is already explicitly defined in
+the model. If the model contains aliases/substitutions, setters first account
+for those aliases before appending, so they can also fail if alias evaluation
+fails.
+
+Unless stated otherwise, error reports for these term-binding setters include:
+
+- If *var* is not a valid term:
+
+  -- error code: :c:enum:`INVALID_TERM`
+
+- If *var* is not an uninterpreted term:
+
+  -- error code: :c:enum:`MDL_UNINT_REQUIRED`
+
+- If *var* is already explicitly defined in the model:
+
+  -- error code: :c:enum:`MDL_DUPLICATE_VAR`
 
 .. c:function:: int32_t yices_model_set_scalar(model_t *model, term_t var, int32_t val)
 
@@ -247,7 +369,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -274,7 +396,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid Boolean uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -301,7 +423,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid integer uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -328,7 +450,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid integer uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -356,7 +478,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid real uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -385,7 +507,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid real uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -413,7 +535,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid integer uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -446,7 +568,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid real uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -454,6 +576,40 @@ These functions are useful for creating custom models or modifying existing ones
 
    This function is not declared unless you include :file:`gmp.h`
    before :file:`yices.h` in your code.
+
+.. c:function:: int32_t yices_model_set_ff_mpz(model_t *model, term_t var, mpz_t val)
+
+   Assign a GMP integer value to a finite-field uninterpreted term in the model (Since 2.7.0).
+
+   **Parameters**
+
+   - *model*: pointer to the model in which the assignment is made
+   - *var*: the uninterpreted term of finite-field type to assign a value to
+   - *val*: the GMP integer value to assign to var
+
+   **Requirements**
+
+   - *var* must be an uninterpreted finite-field term
+   - *var* must not already have a value in model
+   - *val* must be initialized (see the GMP documentation)
+
+   **Returns**
+
+   - 0 on success
+   - -1 on error
+
+   **Error report**
+
+   - If *var* is not a valid term:
+
+     -- error code: :c:enum:`INVALID_TERM`
+
+   **Note**
+
+   This function is not declared unless you include :file:`gmp.h`
+   before :file:`yices.h` in your code.
+
+   Since Yices 2.8.0.
 
 
 .. c:function:: int32_t yices_model_set_algebraic_number(model_t *model, term_t var, const lp_algebraic_number_t *val)
@@ -479,7 +635,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid real uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -511,7 +667,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid bitvector uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -538,7 +694,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid bitvector uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -564,7 +720,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid bitvector uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -591,7 +747,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid bitvector uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -619,7 +775,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid bitvector uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -654,7 +810,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid bitvector uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -681,7 +837,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid real uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -708,7 +864,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid real uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -737,7 +893,7 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
 
@@ -750,13 +906,14 @@ These functions are useful for creating custom models or modifying existing ones
 
    - *model*: pointer to the model in which the assignment is made
    - *var*: the uninterpreted symbol to assign a value to
-   - *yval*: the value descriptor (possibly from another model)
+   - *yval*: the value descriptor from the same model
 
    **Requirements**
 
    - *var* must be an uninterpreted term
    - *var* must not already have a value in model
    - *yval* must be compatible with var's type
+   - *yval* **HAS** to come from the same model instance
 
    **Returns**
 
@@ -765,9 +922,342 @@ These functions are useful for creating custom models or modifying existing ones
 
    **Error report**
 
-   - If *var* is not a valid uninterpreted term or is already assigned:
+   - If *var* is not a valid term:
 
      -- error code: :c:enum:`INVALID_TERM`
+
+.. c:function:: int32_t yices_model_export_value(model_t *src, model_t *dst, const yval_t *src_val, yval_t *dst_val)
+
+   Copy a model-local value descriptor from *src* into *dst*.
+
+   The descriptor *src_val* must refer to a value in *src*. On success,
+   *dst_val* is set to a descriptor for an equivalent value stored in *dst*.
+   Composite values such as tuples, mappings, functions, and updates are copied
+   recursively, so *dst_val* remains valid after *src* is deleted.
+
+   This function does not bind any term in *dst*. To assign the exported value
+   to a term, pass *dst_val* to :c:func:`yices_model_set_yval` or to another
+   model-construction function that accepts a value descriptor.
+
+   **Returns**
+
+   - 0 on success
+   - -1 on error
+
+   **Error report**
+
+   - If *src_val* is not a valid descriptor for *src*:
+
+     -- error code: :c:enum:`TYPE_MISMATCH`
+
+   Since Yices 2.8.0.
+
+.. c:function:: int32_t yices_model_make_tuple(model_t *model, uint32_t n, const yval_t elem[], yval_t *tuple)
+
+   Build a tuple value in *model* from an array of value descriptors.
+
+   **Parameters**
+
+   - *model*: pointer to the model in which the tuple is built
+   - *n*: number of tuple elements
+   - *elem*: array of *n* value descriptors
+   - *tuple*: output descriptor for the resulting tuple value
+
+   **Requirements**
+
+   - every descriptor in *elem* must refer to a value in *model*
+   - every descriptor in *elem* must have a tag consistent with the referenced value
+
+   **Returns**
+
+   - 0 on success
+   - -1 on error
+
+   **Error report**
+
+   - If one of the descriptors in *elem* is invalid for *model*:
+
+     -- error code: :c:enum:`TYPE_MISMATCH`
+
+   Since Yices 2.8.0.
+
+.. c:function:: int32_t yices_model_set_tuple(model_t *model, term_t var, uint32_t n, const yval_t elem[])
+
+   Assign a tuple value built from *elem* to an uninterpreted symbol in *model*.
+
+   **Parameters**
+
+   - *model*: pointer to the model in which the assignment is made
+   - *var*: the uninterpreted symbol to assign a value to
+   - *n*: number of tuple elements
+   - *elem*: array of *n* value descriptors
+
+   **Requirements**
+
+   - *var* must be an uninterpreted term
+   - *var* must not already have a value in model
+   - every descriptor in *elem* must refer to a value in *model*
+   - the tuple built from *elem* must be type-compatible with *var*
+
+   **Returns**
+
+   - 0 on success
+   - -1 on error
+
+   **Error report**
+
+   - If *var* is invalid:
+
+     -- error code: :c:enum:`INVALID_TERM`
+   - If one element in *elem* is invalid for *model* or tuple type is incompatible:
+
+     -- error code: :c:enum:`TYPE_MISMATCH`
+
+   Since Yices 2.8.0.
+
+.. c:function:: int32_t yices_model_make_mapping(model_t *model, uint32_t arity, const yval_t args[], const yval_t *value, yval_t *mapping)
+
+   Build a mapping value [*args[0]* ... *args[arity-1]* -> *value*] in *model*.
+
+   **Parameters**
+
+   - *model*: pointer to the model in which the mapping is built
+   - *arity*: number of mapping arguments
+   - *args*: array of *arity* argument descriptors
+   - *value*: descriptor for the mapping result
+   - *mapping*: output descriptor for the resulting mapping value
+
+   **Requirements**
+
+   - every descriptor in *args* must refer to a value in *model*
+   - *value* must refer to a value in *model*
+   - every descriptor tag must be consistent with the referenced value
+
+   **Returns**
+
+   - 0 on success
+   - -1 on error
+
+   **Error report**
+
+   - If one input descriptor is invalid for *model*:
+
+     -- error code: :c:enum:`TYPE_MISMATCH`
+
+   Since Yices 2.8.0.
+
+.. c:function:: int32_t yices_model_make_function(model_t *model, type_t fun_type, uint32_t n, const yval_t mappings[], const yval_t *def, yval_t *fun)
+
+   Build a function value in *model* from mapping descriptors and a default value.
+
+   **Parameters**
+
+   - *model*: pointer to the model in which the function is built
+   - *fun_type*: function type of the result
+   - *n*: number of mapping descriptors
+   - *mappings*: array of *n* mapping descriptors
+   - *def*: default value descriptor
+   - *fun*: output descriptor for the resulting function value
+
+   **Requirements**
+
+   - *fun_type* must be a function type
+   - every descriptor in *mappings* must refer to a mapping value in *model*
+   - every descriptor in *mappings* must have a tag consistent with the referenced value
+   - each mapping must have the same arity as *fun_type*'s domain
+   - each mapping argument/result must be type-compatible with *fun_type*
+   - *def* must refer to a value in *model* and be type-compatible with *fun_type*'s range
+
+   **Returns**
+
+   - 0 on success
+   - -1 on error
+
+   **Error report**
+
+   - If *fun_type* is not a function type:
+
+     -- error code: :c:enum:`TYPE_MISMATCH`
+   - If one mapping/default descriptor is invalid for *model* or not type-compatible:
+
+     -- error code: :c:enum:`TYPE_MISMATCH`
+
+   Since Yices 2.8.0.
+
+.. c:function:: int32_t yices_model_set_function(model_t *model, term_t var, uint32_t n, const yval_t mappings[], const yval_t *def)
+
+   Assign a function value built from *mappings* and *def* to an uninterpreted symbol in *model*.
+
+   **Parameters**
+
+   - *model*: pointer to the model in which the assignment is made
+   - *var*: the uninterpreted symbol to assign a value to
+   - *n*: number of mapping descriptors
+   - *mappings*: array of *n* mapping descriptors
+   - *def*: default value descriptor
+
+   **Requirements**
+
+   - *var* must be an uninterpreted term
+   - *var* must have function type
+   - *var* must not already have a value in model
+   - *mappings*/*def* must satisfy the same requirements as in :c:func:`yices_model_make_function`
+
+   **Returns**
+
+   - 0 on success
+   - -1 on error
+
+   **Error report**
+
+   - If *var* is invalid:
+
+     -- error code: :c:enum:`INVALID_TERM`
+   - If *var* does not have function type or *mappings*/*def* are invalid:
+
+     -- error code: :c:enum:`TYPE_MISMATCH`
+
+   Since Yices 2.8.0.
+
+.. c:function:: int32_t yices_model_get_zero_rdiv_function(model_t *mdl, yval_t *fun)
+
+   Get the model's interpretation of real division by zero as a function of type
+   ``[real -> real]``.
+
+   If this interpretation is explicitly set in *mdl*, the stored function or
+   update value is returned. If it is not set, the function returns a default
+   constant-zero function descriptor without making that default explicit in
+   *mdl*. The returned descriptor is model-local and can be inspected with
+   :c:func:`yices_val_expand_function`.
+
+   Since Yices 2.8.0.
+
+
+.. c:function:: int32_t yices_model_get_zero_idiv_function(model_t *mdl, yval_t *fun)
+
+   Get the model's interpretation of integer division by zero as a function of
+   type ``[int -> int]``.
+
+   This follows the same conventions as
+   :c:func:`yices_model_get_zero_rdiv_function`.
+
+   Since Yices 2.8.0.
+
+
+.. c:function:: int32_t yices_model_get_zero_mod_function(model_t *mdl, yval_t *fun)
+
+   Get the model's interpretation of integer modulo by zero as a function of
+   type ``[int -> int]``.
+
+   This follows the same conventions as
+   :c:func:`yices_model_get_zero_rdiv_function`.
+
+   Since Yices 2.8.0.
+
+
+.. c:function:: int32_t yices_model_set_zero_rdiv_function(model_t *mdl, const yval_t *fun)
+
+   Set the model's interpretation of real division by zero.
+
+   The descriptor *fun* must refer to a function or update value in *mdl* of
+   type ``[real -> real]``. This setter is append-only: it fails if the real
+   division-by-zero interpretation is already explicitly set.
+
+   To use a function or update value from another model, first copy it into
+   *mdl* with :c:func:`yices_model_export_value`.
+
+   **Returns**
+
+   - 0 on success
+   - -1 on error
+
+   **Error report**
+
+   - If *fun* is not a valid function/update descriptor for *mdl* or has the
+     wrong type:
+
+     -- error code: :c:enum:`TYPE_MISMATCH`
+
+   - If the real division-by-zero interpretation is already explicitly set:
+
+     -- error code: :c:enum:`MDL_DUPLICATE_VAR`
+
+   Since Yices 2.8.0.
+
+
+.. c:function:: int32_t yices_model_set_zero_idiv_function(model_t *mdl, const yval_t *fun)
+
+   Set the model's interpretation of integer division by zero.
+
+   The descriptor *fun* must refer to a function or update value in *mdl* of
+   type ``[int -> int]``. This setter follows the same append-only and error
+   conventions as :c:func:`yices_model_set_zero_rdiv_function`.
+
+   Since Yices 2.8.0.
+
+
+.. c:function:: int32_t yices_model_set_zero_mod_function(model_t *mdl, const yval_t *fun)
+
+   Set the model's interpretation of integer modulo by zero.
+
+   The descriptor *fun* must refer to a function or update value in *mdl* of
+   type ``[int -> int]``. This setter follows the same append-only and error
+   conventions as :c:func:`yices_model_set_zero_rdiv_function`.
+
+   Since Yices 2.8.0.
+
+Example (compile/run checked)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following example demonstrates tuple and function value construction
+with ``yval_t`` objects.
+
+.. code-block:: c
+
+   model_t *model = yices_new_model();
+   type_t int_type = yices_int_type();
+   type_t bool_type = yices_bool_type();
+   type_t tuple_type = yices_tuple_type3(int_type, int_type, bool_type);
+   type_t fun_type = yices_function_type2(int_type, int_type, bool_type);
+
+   term_t x = yices_new_uninterpreted_term(int_type);
+   term_t y = yices_new_uninterpreted_term(int_type);
+   term_t b = yices_new_uninterpreted_term(bool_type);
+   term_t t = yices_new_uninterpreted_term(tuple_type);
+   term_t f = yices_new_uninterpreted_term(fun_type);
+
+   yices_model_set_int32(model, x, 3);
+   yices_model_set_int32(model, y, 5);
+   yices_model_set_bool(model, b, 1);
+
+   yval_t xv, yv, bv;
+   yices_get_value(model, x, &xv);
+   yices_get_value(model, y, &yv);
+   yices_get_value(model, b, &bv);
+
+   // Tuple: (x, y, b)
+   yval_t tuple_elems[3] = { xv, yv, bv };
+   yval_t tuple_v;
+   yices_model_make_tuple(model, 3, tuple_elems, &tuple_v);
+   yices_model_set_tuple(model, t, 3, tuple_elems);
+
+   // Mapping: [x, y -> b]
+   yval_t map_args[2] = { xv, yv };
+   yval_t map_v;
+   yices_model_make_mapping(model, 2, map_args, &bv, &map_v);
+
+   // Function with one mapping and default false
+   yval_t false_v;
+   yices_get_value(model, yices_false(), &false_v);
+   yval_t maps[1] = { map_v };
+   yval_t fun_v;
+   yices_model_make_function(model, fun_type, 1, maps, &false_v, &fun_v);
+   yices_model_set_function(model, f, 1, maps, &false_v);
+
+   // Query result for f(x, y)
+   term_t fxy = yices_application2(f, x, y);
+   int32_t bval;
+   yices_get_bool_value(model, fxy, &bval);
 
 
 
@@ -928,6 +1418,28 @@ Atomic Values
 
    Like :c:func:`yices_get_mpz_value`, this function is declared if
    header file :file:`gmp.h` is included before :file:`yices.h`.
+
+.. c:function:: int32_t yices_get_ff_value(model_t *mdl, term_t t, mpz_t val, mpz_t mod)
+
+   Value of a finite-field term (Since 2.7.0).
+
+   This function evaluates *t* in *mdl* and stores the finite-field
+   value in *val* and the corresponding field modulus in *mod*.
+
+   **Error report**
+
+   - If *t* is not a finite-field term:
+
+     -- error code: :c:enum:`ARITHTERM_REQUIRED`
+
+     -- term1 := *t*
+
+   **Note**
+
+   This function is not declared unless you include :file:`gmp.h`
+   before :file:`yices.h` in your code.
+
+   Since Yices 2.8.0.
 
 
 .. c:function:: int32_t yices_get_algebraic_number_value(model_t *mdl, term_t t, lp_algebraic_number_t *a)
@@ -1093,6 +1605,8 @@ Leaf nodes represent atomic values. They can have the following tags:
    - :c:enum:`YVAL_BOOL`: Boolean value
 
    - :c:enum:`YVAL_RATIONAL`: Rational or integer constant
+
+   - :c:enum:`YVAL_FINITEFIELD`: Finite-field constant
 
    - :c:enum:`YVAL_ALGEBRAIC`: Algebraic number
 
@@ -1418,6 +1932,28 @@ the children of non-leaf nodes.
    This function is not declared unless you include :file:`gmp.h`
    before :file:`yices.h` in your code.
 
+.. c:function:: int32_t yices_val_get_ff(model_t *mdl, const yval_t *v, mpz_t val, mpz_t mod)
+
+   Node value as a finite-field constant (Since 2.7.0).
+
+   This function checks whether node *v* has tag :c:enum:`YVAL_FINITEFIELD`.
+   If so, it copies the node value in *val* and the finite-field
+   modulus in *mod* and returns 0. Otherwise, it leaves outputs
+   unchanged and returns -1.
+
+   **Error report**
+
+   - If the node does not have tag :c:enum:`YVAL_FINITEFIELD`
+
+     -- error code: :c:enum:`YVAL_INVALID_OP`
+
+   **Note**
+
+   This function is not declared unless you include :file:`gmp.h`
+   before :file:`yices.h` in your code.
+
+   Since Yices 2.8.0.
+
 
 .. c:function:: int32_t yices_val_get_algebraic_number(model_t *mdl, const yval_t *v, lp_algebraic_number_t *a)
 
@@ -1698,6 +2234,9 @@ Implicants
 
    - the conjunction (a\ |_1| |and| |...| |and| a\ |_n|) implies *t*
 
+   No literal returned in *v* contains an if-then-else term, even if *t*
+   does.
+
    The implicant is returned in vector *v*, which must be initialized by :c:func:`yices_init_term_vector`:
 
    - *v->size* stores the number of literals in the implicant (i.e., *n*).
@@ -1739,6 +2278,41 @@ Implicants
    has returns 0 if the implicant can be constructed or -1 otherwise. It has the same behavior and reports
    the same errors as :c:func:`yices_implicant_for_formula`.
 
+.. c:function:: int32_t yices_implicant_cubes_for_formula(model_t *mdl, term_t t, uint32_t max_cubes, term_vector_t *v)
+
+   Enumerates several implicant cubes for formula *t*.
+
+   The parameter *max_cubes* is the maximum number of distinct cubes to
+   return. If *max_cubes* is 0, there is no explicit cap. Larger values of
+   *max_cubes* make this function more expensive.
+
+   If the function succeeds, it returns a value *k >= 1*. Then *v* contains
+   the literals of *k* cubes, separated by *k-1* occurrences of
+   :c:macro:`NULL_TERM`. There is no trailing :c:macro:`NULL_TERM`.
+   For example, two cubes { *a*, *b* } and { *c* } are returned as
+   *a*, *b*, :c:macro:`NULL_TERM`, *c*.
+
+   Each returned cube is true in *mdl* and implies *t*. If *max_cubes* is 1,
+   the result has the same flat literal-vector shape as
+   :c:func:`yices_implicant_for_formula`.
+
+   As for :c:func:`yices_implicant_for_formula`, no returned cube literal
+   contains an if-then-else term, even if the input formula does.
+
+   If there's an error, the function returns -1 and resets *v* to the empty
+   vector. The error report is as for :c:func:`yices_implicant_for_formula`.
+
+   Since Yices 2.8.0.
+
+.. c:function:: int32_t yices_implicant_cubes_for_formulas(model_t *mdl, uint32_t n, const term_t a[], uint32_t max_cubes, term_vector_t *v)
+
+   Enumerates several implicant cubes for a conjunction of formulas.
+
+   This function is the same as :c:func:`yices_implicant_cubes_for_formula`,
+   but the input formula is the conjunction of *a[0]* |and| ... |and| *a[n-1]*.
+
+   Since Yices 2.8.0.
+
 
 Model Generalization
 --------------------
@@ -1751,28 +2325,36 @@ the model. The formula  *G(X)* satisfies two properties:
   2) *G(X)* implies (exists *y* *F(x, y)*)
 
 
-Yices supports two generalization methods:
+Yices supports three generalization methods:
 
   - **Generalization by substitution:** This is the simplest method. It eliminates the
     variables *Y* by replacing them by their values in the model.
 
-  - **Generalization by projection:** This first computes an implicant of formula *F(X, Y)*
-    then eliminates the *Y* variables from this implicant by projection. The projection is
-    a cheap form of quantifier elimination. It is a hybrid a Fourier-Motzkin elimination
-    and virtual term substitution.
+  - **Generalization by projection** (:c:enum:`YICES_GEN_BY_PROJ`): This first computes
+    an implicant of formula *F(X, Y)* then eliminates the *Y* variables from this implicant
+    by projection. The projection is a cheap form of quantifier elimination — a hybrid of
+    Fourier-Motzkin elimination and virtual term substitution.
 
-The two generalization functions take a parameter that specifies the generalization method.
-This parameter takes a value of type :c:type:`yices_gen_mode_t`:
+  - **Wide projection** (:c:enum:`YICES_GEN_BY_PROJ_WIDE`, Since 2.8.0): A SAT-guided
+    extension of projection that walks the Boolean structure of *F(X, Y)*, enumerates
+    multiple model-true implicant cubes, and returns their union. The result is always at
+    least as broad as :c:enum:`YICES_GEN_BY_PROJ` and is often strictly broader when the
+    formula has Boolean structure that the model satisfies in more than one way.
+
+The generalization functions take a parameter of type :c:type:`yices_gen_mode_t`:
 
   - :c:enum:`YICES_GEN_BY_SUBST` selects generalization by substitution;
 
   - :c:enum:`YICES_GEN_BY_PROJ` selects generalization by projection;
 
+  - :c:enum:`YICES_GEN_BY_PROJ_WIDE` selects wide projection;
+
   - :c:enum:`YICES_GEN_DEFAULT` automatically chooses the
     generalization method based on the type of variables to
     eliminate. If any variable to eliminate is an arithmetic variable,
-    then generalization by projection is used. Otherwise, the default
-    is generalization by substitution.
+    then the legacy projection mode :c:enum:`YICES_GEN_BY_PROJ` is used.
+    Otherwise, the default is generalization by substitution. The wide
+    projection mode is never selected implicitly.
 
 .. c:function:: int32_t yices_generalize_model(model_t *mdl, term_t t, uint32_t nelims, const term_t elim[], yices_gen_mode_t mode, term_vector_t *v)
 
@@ -1806,6 +2388,14 @@ This parameter takes a value of type :c:type:`yices_gen_mode_t`:
 
    If *mode* is :c:enum:`YICES_GEN_BY_PROJ` then every formula in *v* is guaranteed to be a literal.
 
+   If *mode* is :c:enum:`YICES_GEN_BY_PROJ_WIDE`, the shape of *v* depends
+   on the number of projected cubes. If there is a single projected cube,
+   *v* is filled with the projected literals exactly as in
+   :c:enum:`YICES_GEN_BY_PROJ`. If there are multiple projected cubes, *v*
+   contains a single element that is a disjunction of
+   literal-conjunctions. In all cases, the conjunction of the terms in *v*
+   is the generalization.
+
    The function returns 0 if the generalization succeeds or -1 if there's an error.
 
 .. c:function:: int32_t yices_generalize_model_array(model_t *mdl, uint32_t n, const term_t a[], uint32_t nelims, const term_t elim[], yices_gen_mode_t mode, term_vector_t *v)
@@ -1831,3 +2421,100 @@ This parameter takes a value of type :c:type:`yices_gen_mode_t`:
    This function is equivalent to calling :c:func:`yices_generalize_model` with
    argument (*a[0]* |and| |...| |and| *a[n-1]*).
 
+.. c:function:: int32_t yices_generalize_model_with_budget(model_t *mdl, term_t t, uint32_t nelims, const term_t elim[], yices_gen_mode_t mode, uint32_t cube_budget, term_vector_t *v)
+
+   Model generalization for a single formula with an explicit cube budget.
+
+   This function is identical to :c:func:`yices_generalize_model` except for the
+   additional *cube_budget* parameter, which only applies to mode
+   :c:enum:`YICES_GEN_BY_PROJ_WIDE`. The budget is ignored for
+   :c:enum:`YICES_GEN_BY_SUBST`, :c:enum:`YICES_GEN_BY_PROJ`, and
+   :c:enum:`YICES_GEN_DEFAULT`.
+
+   **Parameters**
+
+   - *mdl*: model
+
+   - *t*: Boolean term that is true in *mdl*
+
+   - *nelims*: number of variables to eliminate
+
+   - *elim*: variables to eliminate
+
+   - *mode*: generalization method
+
+   - *cube_budget*: caps the number of distinct normalized cubes attempted for
+     projection inside the wide enumeration loop. Duplicate normalized cubes are
+     skipped. When the cap is hit with at least one successful projection, the
+     result is the union of the collected projected cubes; otherwise the wide
+     path falls back to the local projection pipeline. A value of 0 means no
+     explicit cap. Ignored for all modes other than
+     :c:enum:`YICES_GEN_BY_PROJ_WIDE`.
+
+   - *v*: term vector to store the result
+
+   When *cube_budget* is 0, this function behaves identically to
+   :c:func:`yices_generalize_model`.
+
+   *Since 2.8.0.*
+
+.. c:function:: int32_t yices_generalize_model_array_with_budget(model_t *mdl, uint32_t n, const term_t a[], uint32_t nelims, const term_t elim[], yices_gen_mode_t mode, uint32_t cube_budget, term_vector_t *v)
+
+   Model generalization for an array of formulas with an explicit cube budget.
+
+   This function is equivalent to calling
+   :c:func:`yices_generalize_model_with_budget` with argument
+   (*a[0]* |and| |...| |and| *a[n-1]*).
+
+   *Since 2.8.0.*
+
+
+Implicant Cube Enumeration
+--------------------------
+
+.. c:function:: int32_t yices_implicant_cubes_for_formula(model_t *mdl, term_t t, uint32_t max_cubes, term_vector_t *v)
+
+   Enumerates multiple implicant cubes for a formula.
+
+   This function computes up to *max_cubes* distinct implicant cubes of *t* in
+   model *mdl*. The Boolean abstraction of *t* is searched with strict
+   false-first decisions and superset blockers, so returned cubes are built from
+   subset-minimal satisfying sets of abstraction literals.
+
+   **Parameters**
+
+   - *mdl*: model
+
+   - *t*: Boolean term that is true in *mdl*
+
+   - *max_cubes*: maximum number of cubes to return. A value of 0 means no explicit cap.
+
+   - *v*: term vector to store the result (must be initialized with :c:func:`yices_init_term_vector`)
+
+   **Return value and result encoding**
+
+   If the return code is *k* |geq| 1, then *v* contains the literals of *k* cubes
+   separated by *k - 1* occurrences of :c:macro:`NULL_TERM`. There is no trailing
+   :c:macro:`NULL_TERM`. For example, two cubes {*a*, *b*} and {*c*} are encoded as::
+
+      a, b, NULL_TERM, c
+
+   Each cube is true in *mdl* and implies *t*. When *max_cubes* is 1, the
+   result has the same flat literal-vector layout as
+   :c:func:`yices_implicant_for_formula`.
+
+   If the return code is -1, *v* is empty and the error report is the same as for
+   :c:func:`yices_implicant_for_formula`.
+
+   *Since 2.8.0.*
+
+.. c:function:: int32_t yices_implicant_cubes_for_formulas(model_t *mdl, uint32_t n, const term_t a[], uint32_t max_cubes, term_vector_t *v)
+
+   Enumerates multiple implicant cubes for a conjunction of formulas.
+
+   This is the array variant of :c:func:`yices_implicant_cubes_for_formula`.
+   It enumerates cubes for the conjunction (*a[0]* |and| |...| |and| *a[n-1]*).
+   The result encoding, return codes, and errors are as described for
+   :c:func:`yices_implicant_cubes_for_formula`.
+
+   *Since 2.8.0.*

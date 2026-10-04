@@ -1,23 +1,24 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: yices2
-Upstream-Contact: Bruno Dutertre <bruno@csl.sri.com>
-Source: https://github.com/SRI-CSL/yices2
+Upstream-Name: yices-tra
+Upstream-Contact: Alessio Mansutti <alessio.mansutti@imdea.org>
+Source: https://github.com/arith-lab/yices-tra
 
 
 Files: *
 Copyright: 2017 SRI International
+           2026 IMDEA Software Institute
 License: GPL-3+
 
 License: GPL-3+
- Yices2 is free software: you can redistribute it and/or modify
- it under the terms of the GNU Lesser General Public License as published by
+ YicesTRA is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
  the Free Software Foundation, either version 3 of the License, or
  (at your option) any later version.
  .
- Yices2 is distributed in the hope that it will be useful,
+ YicesTRA is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU Lesser General Public License for more details.
+ GNU General Public License for more details.
  .
  On Debian systems, the full text of the GNU General Public
  License version 3 can be found in the file

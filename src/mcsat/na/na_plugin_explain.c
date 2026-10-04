@@ -19,6 +19,8 @@
 #include "na_plugin_explain.h"
 #include "na_plugin_internal.h"
 #include "na_libpoly.h"
+#include "na_definitions.h"
+#include "mcsat/na/poly-backends/tra_libpoly_poly.h"
 #include "mcsat/utils/lp_utils.h"
 
 #include "utils/int_hash_map.h"
@@ -120,6 +122,9 @@ struct lp_projection_map_struct {
 
   /** Whether to use the default NLSAT projection */
   bool use_nlsat;
+
+  /** Polynomial operations, not owned */
+  const na_poly_backend_t* backend;
 };
 
 typedef struct lp_projection_map_struct lp_projection_map_t;
@@ -133,9 +138,11 @@ void lp_projection_map_construct(lp_projection_map_t* map,
     rba_buffer_t* buffer,   /** Can be NULL */
     plugin_context_t* ctx,  /** Can be NULL */
     bool use_mgcd,
-    bool use_nlsat
+    bool use_nlsat,
+    const na_poly_backend_t* backend  /** Not NULL, not owned */
 )
 {
+  assert(backend != NULL);
   map->data_size = 0;
   map->data_capacity = LP_PROJECTION_MAP_DEFAULT_SIZE;
   map->data = safe_malloc(sizeof(lp_polynomial_hash_set_t)*map->data_capacity);
@@ -145,6 +152,7 @@ void lp_projection_map_construct(lp_projection_map_t* map,
   map->plugin_ctx = ctx;
   map->use_mgcd = use_mgcd;
   map->use_nlsat = use_nlsat;
+  map->backend = backend;
 
   map->external_buffer = (buffer != NULL);
   if (map->external_buffer) {
@@ -162,7 +170,7 @@ void lp_projection_map_construct(lp_projection_map_t* map,
 void lp_projection_map_construct_from_na(lp_projection_map_t* map, na_plugin_t* na) {
   lp_projection_map_construct(map,
       na->ctx->tm, &na->lp_data, &na->buffer, na->ctx,
-      na->ctx->options->na_mgcd, na->ctx->options->na_nlsat);
+      na->ctx->options->na_mgcd, na->ctx->options->na_nlsat, na->backend);
 }
 
 void lp_projection_map_destruct(lp_projection_map_t* map) {
@@ -265,7 +273,7 @@ void lp_projection_map_add(lp_projection_map_t* map, const lp_polynomial_t* p) {
   lp_polynomial_t** p_r_factors = 0;
   size_t* p_r_factors_multiplicities = 0;
   size_t p_r_factors_size = 0;
-  lp_polynomial_factor_square_free(p_r, &p_r_factors, &p_r_factors_multiplicities, &p_r_factors_size);
+  map->backend->factor_square_free(p_r, &p_r_factors, &p_r_factors_multiplicities, &p_r_factors_size);
 
   uint32_t i;
 
@@ -569,7 +577,7 @@ void lp_projection_map_construct_cell(lp_projection_map_t* map, lp_variable_t x,
     assert(p_deg > 0);
     lp_value_t* p_roots = safe_malloc(sizeof(lp_value_t)*p_deg);
     size_t p_roots_size = 0;
-    lp_polynomial_roots_isolate(p, map->lp_data->lp_assignment, p_roots, &p_roots_size);
+    map->backend->roots_isolate(p, map->lp_data->lp_assignment, p_roots, &p_roots_size);
 
     if (ctx_trace_enabled(ctx, "na::explain::projection")) {
       ctx_trace_printf(ctx, "roots = ");
@@ -724,6 +732,20 @@ void lp_projection_map_add_psc(lp_projection_map_t* map, lp_polynomial_t*** poly
 
   size_t p_deg = lp_polynomial_degree(p);
   size_t q_deg = lp_polynomial_degree(q);
+
+  // The initial sequence is the resultant alone (psc_0, up to a constant) if it does not vanish
+  if (map->backend->resultant != NULL) {
+    lp_polynomial_t* res = lp_data_new_polynomial(map->lp_data);
+    map->backend->resultant(res, p, q);
+    bool done = lp_polynomial_sgn(res, map->lp_data->lp_assignment) != 0;
+    if (done) {
+      lp_projection_map_add(map, res);
+    }
+    lp_polynomial_delete(res);
+    if (done) {
+      return;
+    }
+  }
 
   uint32_t psc_size = p_deg > q_deg ? q_deg + 1 : p_deg + 1;
   polynomial_buffer_ensure_size(polynomial_buffer, polynomial_buffer_size, psc_size, map->lp_data->lp_ctx);
@@ -1189,6 +1211,20 @@ void na_plugin_explain_conflict(na_plugin_t* na, const int_mset_t* pos, const in
   lp_projection_map_t projection_map;
   lp_projection_map_construct_from_na(&projection_map, na);
 
+  // Definitions to substitute into the unit core polynomials (na_definitions.h). Soundness: let D
+  // be the definitions used, true in M. Each rewritten polynomial is a nonzero constant times the
+  // original one where D holds (na_substitute_definitions), so the rewritten core is infeasible in x
+  // at M, and on the cell computed below. On the cell and D, the original core is equivalent to the
+  // rewritten one. Hence the cell, the core and D form a valid conflict.
+  int_hmap_t defs;
+  ivector_t defs_used;
+  init_int_hmap(&defs, 0);
+  init_ivector(&defs_used, 0);
+  if (na->def_subst) {
+    na_collect_definitions(na, &defs);
+  }
+  lp_variable_t x_lp = lp_data_get_lp_variable_from_term(&na->lp_data, variable_db_get_term(na->ctx->var_db, conflict_var));
+
   // Add all the polynomials
   uint32_t core_i;
   for (core_i = 0; core_i < core->size; ++ core_i) {
@@ -1210,33 +1246,18 @@ void na_plugin_explain_conflict(na_plugin_t* na, const int_mset_t* pos, const in
       if (p_inference_reason != NULL) {
         is_inference = true;
         lp_projection_map_add(&projection_map, p_inference_reason);
-        // print adding p_inference_reason
-        if (ctx_trace_enabled(na->ctx, "na::nta")) {
-          ctx_trace_printf(na->ctx, "\nadding inference reason for constraint ");
-          poly_constraint_print(constraint, ctx_trace_out(na->ctx));
-          ctx_trace_printf(na->ctx, ": ");
-          lp_polynomial_print(p_inference_reason, ctx_trace_out(na->ctx));
-          ctx_trace_printf(na->ctx, "\n");
-        }
         lp_polynomial_delete(p_inference_reason);
-      }
-      else{
-        if (ctx_trace_enabled(na->ctx, "na::nta")) {
-          ctx_trace_printf(na->ctx, "\nnot adding inference reason for constraint ");
-          poly_constraint_print(constraint, ctx_trace_out(na->ctx));
-          ctx_trace_printf(na->ctx, "\n");
-        }
       }
     }
     if (!is_inference) {
       const lp_polynomial_t* p = poly_constraint_get_polynomial(constraint);
-      lp_projection_map_add(&projection_map, p);
-      if (ctx_trace_enabled(na->ctx, "na::nta")) {
-        ctx_trace_printf(na->ctx, "\nadding original polynomial for constraint ");
-        poly_constraint_print(constraint, ctx_trace_out(na->ctx));
-        ctx_trace_printf(na->ctx, ": ");
-        lp_polynomial_print(p, ctx_trace_out(na->ctx));
-        ctx_trace_printf(na->ctx, "\n");
+      if ((is_unit || is_speculation) && defs.nelems > 0) {
+        lp_polynomial_t* p_subst = lp_polynomial_new_copy(p);
+        na_substitute_definitions(na, &defs, x_lp, p_subst, &defs_used);
+        lp_projection_map_add(&projection_map, p_subst);
+        lp_polynomial_delete(p_subst);
+      } else {
+        lp_projection_map_add(&projection_map, p);
       }
     }
 
@@ -1265,6 +1286,13 @@ void na_plugin_explain_conflict(na_plugin_t* na, const int_mset_t* pos, const in
     }
     ivector_push(conflict, constraint_term);
   }
+
+  // Add the definitions used (true on the trail)
+  for (core_i = 0; core_i < defs_used.size; ++ core_i) {
+    ivector_push(conflict, variable_db_get_term(na->ctx->var_db, defs_used.data[core_i]));
+  }
+  delete_int_hmap(&defs);
+  delete_ivector(&defs_used);
 
   // Remove the projection map
   lp_projection_map_destruct(&projection_map);
@@ -1437,7 +1465,8 @@ int32_t na_project_arith_literals(ivector_t* literals, model_t* mdl, term_manage
 
   // Set up the projection
   lp_projection_map_t projector;
-  lp_projection_map_construct(&projector, tm, &lp_data, NULL, NULL, false, false);
+  na_poly_backend_t* backend = tra_libpoly_backend_allocator();
+  lp_projection_map_construct(&projector, tm, &lp_data, NULL, NULL, false, false, backend);
   projector.use_root_constraints_for_cells = false;
 
   // Add all the literals
@@ -1466,6 +1495,7 @@ int32_t na_project_arith_literals(ivector_t* literals, model_t* mdl, term_manage
 
   // Delete temps
   lp_projection_map_destruct(&projector);
+  backend->destruct(backend);
   delete_int_hset(&vars_to_keep_set);
   lp_data_destruct(&lp_data);
 

@@ -1,0 +1,8 @@
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(assert (< x 6.29))
+(assert (> x 5))
+(assert (< (sin x) 0.7))
+(assert (> (sin x) 0.4))
+(assert (= 0.25 (* (sin x) (sin x))))
+(check-sat)

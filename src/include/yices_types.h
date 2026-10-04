@@ -135,7 +135,8 @@ typedef enum term_constructor {
   // atomic terms
   YICES_BOOL_CONSTANT,       // boolean constant
   YICES_ARITH_CONSTANT,      // rational constant
-  YICES_ARITH_FF_CONSTANT,   // finite field rational constant
+  YICES_FF_CONSTANT,         // finite-field constant
+  YICES_ARITH_FF_CONSTANT = YICES_FF_CONSTANT, // compatibility alias
   YICES_BV_CONSTANT,         // bitvector constant
   YICES_SCALAR_CONSTANT,     // constant of uninterpreted/scalar
   YICES_VARIABLE,            // variable in quantifiers
@@ -185,7 +186,8 @@ typedef enum term_constructor {
   // sums
   YICES_BV_SUM,              // sum of pairs a * t where a is a bitvector constant (and t is a bitvector term)
   YICES_ARITH_SUM,           // sum of pairs a * t where a is a rational (and t is an arithmetic term)
-  YICES_ARITH_FF_SUM,        // sum of pairs a * t where a is an finite field constant (and t is an finite field arithmetic term)
+  YICES_FF_SUM,              // sum of pairs a * t where a is a finite-field constant (and t is a finite-field term)
+  YICES_ARITH_FF_SUM = YICES_FF_SUM, // compatibility alias
 
   // products
   YICES_POWER_PRODUCT        // power products: (t1^d1 * ... * t_n^d_n)
@@ -241,7 +243,7 @@ typedef enum yval_tag {
   YVAL_BOOL,
   YVAL_RATIONAL,
   YVAL_ALGEBRAIC,
-  YVAL_FINITEFIELD,  // TODO establish me in API
+  YVAL_FINITEFIELD,
   YVAL_BV,
   YVAL_SCALAR,
   YVAL_TUPLE,
@@ -273,15 +275,32 @@ typedef struct yval_vector_s {
  *      yices_generalize_model
  * and  yices_generalize_model_array
  *
- * There are currently two algorithms: generalization by
- * substitution and generalization by projection.
- * The default is to select the algorithm based on variables
- * to eliminate.
+ * Three projection-style algorithms are available:
+ *   YICES_GEN_BY_SUBST     -- pure substitution (each elim variable is
+ *                             replaced by its value in the model).
+ *   YICES_GEN_BY_PROJ      -- legacy "implicant-then-project": builds one
+ *                             literal implicant of F at the model and
+ *                             projects that flat conjunction; produces a
+ *                             sign-invariant cell of the chosen implicant.
+ *   YICES_GEN_BY_PROJ_WIDE -- SAT-guided wide projection (Since 2.8.0):
+ *                             enumerates model-true Boolean implicants of
+ *                             F over a polarity-aware abstraction and
+ *                             unions their per-cube projections. Wider
+ *                             output than YICES_GEN_BY_PROJ when F has
+ *                             Boolean structure the model satisfies in
+ *                             more than one way. Accepts a cube_budget
+ *                             through yices_generalize_model_with_budget.
+ *
+ * The default (YICES_GEN_DEFAULT) selects the algorithm based on the
+ * variables to eliminate: substitution for discrete variables and the
+ * legacy projection (YICES_GEN_BY_PROJ) for real variables. The wide
+ * algorithm is opt-in.
  */
 typedef enum yices_gen_mode {
   YICES_GEN_DEFAULT,
   YICES_GEN_BY_SUBST,
-  YICES_GEN_BY_PROJ
+  YICES_GEN_BY_PROJ,        // legacy: implicant-then-project (sign-invariant cell of one chosen implicant)
+  YICES_GEN_BY_PROJ_WIDE,   // SAT-guided wide projection (since 2.8.0)
 } yices_gen_mode_t;
 
 
@@ -478,6 +497,7 @@ typedef enum error_code {
    */
   MCSAT_ERROR_UNSUPPORTED_THEORY = 1000,
   MCSAT_ERROR_ASSUMPTION_TERM_NOT_SUPPORTED = 1001,
+  MCSAT_ERROR_ASSUMPTION_TYPE_NOT_SUPPORTED = 1002, // since 2.8.0
 
   /*
    * Input/output and system errors

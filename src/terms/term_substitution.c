@@ -632,6 +632,15 @@ static term_t subst_arith_ge(term_subst_t *subst, term_t t) {
   return mk_arith_term_geq0(subst->mngr, u);
 }
 
+// x r root_k(p)
+static term_t subst_arith_root_atom(term_subst_t *subst, root_atom_t *r) {
+  term_t x, p;
+
+  x = get_subst(subst, r->x);
+  p = get_subst(subst, r->p);
+  return mk_arith_root_atom(subst->mngr, r->k, x, p, r->r);
+}
+
 // (is-int t)
 static term_t subst_arith_is_int(term_subst_t *subst, term_t t) {
   term_t u;
@@ -1163,9 +1172,7 @@ static term_t subst_composite(term_subst_t *subst, term_t t) {
     break;
 
   case ARITH_ROOT_ATOM:
-    // TODO
-    assert(false);
-    result = NULL_TERM;
+    result = subst_arith_root_atom(subst, arith_root_atom_desc(terms, t));
     break;
 
   case ARITH_IS_INT_ATOM:

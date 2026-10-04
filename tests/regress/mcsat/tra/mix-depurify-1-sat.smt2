@@ -1,0 +1,5 @@
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(declare-fun y () Real)
+(assert (> (sin (+ (exp (exp (+ x y))) (sin (+ x (sin 1))))) 0))
+(check-sat)

@@ -76,6 +76,31 @@ Type Constructors
 
      -- badval := *size*
 
+.. c:function:: type_t yices_ff_type(mpz_t order)
+
+   Constructs a finite-field type (Since 2.7.0).
+
+   **Parameter**
+
+   - *order* must be a positive prime integer
+
+   **Error report**
+
+   - If *order* is not positive:
+
+     -- error code: :c:enum:`POS_INT_REQUIRED`
+
+   - If *order* is not prime:
+
+     -- error code: :c:enum:`INVALID_FFSIZE`
+
+   Since Yices 2.8.0.
+
+   **Note**
+
+   This function is not declared unless you include :file:`gmp.h`
+   before :file:`yices.h` in your code.
+
 
 .. c:function:: type_t yices_new_scalar_type(uint32_t card)
 

@@ -46,6 +46,7 @@ typedef struct int_hset_s {
   uint32_t nelems;
   bool z_flag;
   uint32_t resize_threshold;
+  bool is_closed;
 } int_hset_t;
 
 
@@ -99,6 +100,12 @@ static inline bool int_hset_is_empty(int_hset_t *set) {
   return !int_hset_is_nonempty(set);
 }
 
+/*
+ * Check whether s is closed
+ */
+static inline bool int_hset_is_closed(int_hset_t *set) {
+  return set->is_closed;
+}
 
 /*
  * Check whether x is in set s

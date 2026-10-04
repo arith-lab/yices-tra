@@ -1,0 +1,12 @@
+; The pop removes the value of the constant A, but not its variable, which UF keeps with (f A).
+; Without the fix in NA, a devel build fails the assertion of conflict.c:292. Known issue: MCSAT
+; answers unsat whenever a scalar constant is an argument of an application, such as (f A).
+(define-type T (scalar A B C))
+(define f::(-> T int))
+(define x::T)
+(push)
+(assert (= (f A) 1))
+(pop)
+(assert (or (= x B) (= x C)))
+(assert (= x A))
+(check)

@@ -1,0 +1,15 @@
+; (reset-assertions) resets the term tables, which deletes the declarations of pi, sin and
+; exp made by set-logic; the frontend declares them again, so they keep their meaning.
+(set-logic QF_TRA)
+(assert (> pi 3))
+(check-sat)
+(reset-assertions)
+(assert (< pi 3))
+(check-sat)
+(reset-assertions)
+(declare-fun x () Real)
+(assert (= (sin x) 2))
+(check-sat)
+(reset-assertions)
+(assert (< (exp 1) 2))
+(check-sat)

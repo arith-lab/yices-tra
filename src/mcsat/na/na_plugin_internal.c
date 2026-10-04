@@ -19,12 +19,19 @@
 #include "mcsat/tracing.h"
 #include "mcsat/na/na_plugin_internal.h"
 
+/**
+ * Gets all the arithmetic variables from a non-atom t and adds their corresponding
+ * mcsat variable to vars_out.
+ */
+static
+void na_plugin_get_term_variables(na_plugin_t* na, term_t t, int_mset_t* vars_out);
+
 void na_plugin_get_constraint_variables(na_plugin_t* na, term_t constraint, int_mset_t* vars_out) {
 
-  term_table_t* terms = na->ctx->terms;
+  const term_table_t* terms = na->ctx->terms;
 
-  term_t atom = unsigned_term(constraint);
-  term_kind_t atom_kind = term_kind(na->ctx->terms, atom);
+  const term_t atom = unsigned_term(constraint);
+  const term_kind_t atom_kind = term_kind(na->ctx->terms, atom);
 
   switch (atom_kind) {
   case ARITH_EQ_ATOM:
@@ -47,6 +54,7 @@ void na_plugin_get_constraint_variables(na_plugin_t* na, term_t constraint, int_
   }
 }
 
+static
 void na_plugin_get_term_variables(na_plugin_t* na, term_t t, int_mset_t* vars_out) {
 
   // The term table

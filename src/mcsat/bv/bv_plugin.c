@@ -1171,8 +1171,9 @@ term_t bv_plugin_explain_propagation(plugin_t* plugin, variable_t var, ivector_t
 }
 
 static
-bool bv_plugin_explain_evaluation(plugin_t* plugin, term_t t, int_mset_t* vars, mcsat_value_t* value) {
+bool bv_plugin_explain_evaluation(plugin_t* plugin, term_t t, int_mset_t* vars, const mcsat_value_t* value) {
   bv_plugin_t* bv = (bv_plugin_t*) plugin;
+  (void) value;
   bool result = true;
 
   if (ctx_trace_enabled(bv->ctx, "mcsat::bv::conflict")) {

@@ -25,6 +25,9 @@
  * We provide this so that the compilation works.
  */
 
+#include <assert.h>
+
+#include "mcsat/mcsat_symbols.h"
 #include "mcsat/solver.h"
 
 mcsat_solver_t *mcsat_new(const context_t *ctx) {
@@ -60,6 +63,9 @@ void mcsat_set_model_hint(mcsat_solver_t* mcsat, model_t* mdl, uint32_t n_mdl_fi
 void mcsat_solve(mcsat_solver_t *mcsat, const param_t *params, model_t* mdl, uint32_t n, const term_t t[]) {
 }
 
+void mcsat_cleanup_assumptions(mcsat_solver_t* mcsat) {
+}
+
 void mcsat_set_tracer(mcsat_solver_t *mcsat, tracer_t *tracer) {
 }
 
@@ -82,3 +88,32 @@ term_t mcsat_get_unsat_model_interpolant(mcsat_solver_t* mcsat) {
   return NULL_TERM;
 }
 
+uint32_t mcsat_num_interpreted_symbols(smt_logic_t logic) {
+  return 0;
+}
+
+const mcsat_symbol_t *mcsat_interpreted_symbol(smt_logic_t logic, uint32_t i) {
+  assert(false);
+  return NULL;
+}
+
+bool mcsat_is_interpreted_term(smt_logic_t logic, term_table_t *terms, term_t t) {
+  return false;
+}
+
+void mcsat_set_unsat_result_from_labeled_interpolant(mcsat_solver_t* mcsat, term_t interpolant,
+                                                     uint32_t n, const term_t* labels,
+                                                     const term_t* assumptions) {
+}
+
+bool mcsat_is_delta_mode_enabled(const mcsat_solver_t* mcsat) {
+  return false;
+}
+
+int32_t mcsat_get_delta(const mcsat_solver_t* mcsat) {
+  return 0;
+}
+
+bool mcsat_delta_used(const mcsat_solver_t* mcsat) {
+  return false;
+}

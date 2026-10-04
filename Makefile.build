@@ -89,19 +89,24 @@ srcsubdirs = mt io terms utils solvers solvers/floyd_warshall \
     solvers/funs solvers/bv solvers/egraph solvers/cdcl solvers/simplex solvers/quant \
     parser_utils model api frontend frontend/common \
     frontend/smt1 frontend/yices frontend/smt2 context exists_forall \
-    mcsat mcsat/eq mcsat/weq mcsat/uf mcsat/bool mcsat/ite mcsat/na mcsat/ff mcsat/bv \
-    mcsat/bv/explain mcsat/utils
+    mcsat mcsat/eq mcsat/weq mcsat/uf mcsat/bool mcsat/ite mcsat/na mcsat/na/poly-backends mcsat/ff mcsat/bv \
+		mcsat/bv/explain mcsat/utils mcsat/l2o mcsat/tra mcsat/tra/functions mcsat/tra/utils mcsat/tra/abstractions mcsat/tra/managers
 
 testdir = tests/unit
 regressdir = tests/regress
 regressdir_mcsat = tests/regress/mcsat
-regressdir_mcsat = tests/regress/mcsat/nta # TODO remove "/nta"
+regressdir_tra = tests/regress/mcsat/tra
 apitestdir = tests/api
 
 #
 # Build directory: for this architecture and mode
 #
 build_dir = build/$(ARCH)-$(YICES_MODE)
+
+static_test_lib_target = static-lib
+ifeq ($(HAVE_CADICAL_DELEGATE):$(HAVE_KISSAT_DELEGATE),yes:yes)
+  static_test_lib_target = static-bin
+endif
 
 #
 # Build subdirectories: we build two versions of Yices.  One is
@@ -280,7 +285,7 @@ test: build_subdirs version
 
 static-test: static_build_subdirs version
 	@ echo "=== Building libraries with GMP ==="
-	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) static-lib
+	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) $(static_test_lib_target)
 	@ echo "=== Building tests ==="
 	@ $(MAKE) -C $(testdir) BUILD=../../$(build_dir) all-static
 
@@ -295,7 +300,7 @@ check-api: build_subdirs version
 
 static-check-api: static_build_subdirs version
 	@ echo "=== Building libraries with GMP ==="
-	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) static-lib
+	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) $(static_test_lib_target)
 	@ echo "=== Building tests ==="
 	@ $(MAKE) -C $(apitestdir) BUILD=../../$(build_dir) all-static
 
@@ -305,13 +310,22 @@ static-check-api: static_build_subdirs version
 #
 check: regress
 mcsat-check: mcsat-regress
+tra-check: tra-regress
 static-check: static-regress
+delegate-check: delegate-regress
+static-delegate-check: static-delegate-regress
 
 regress: build_subdirs version
 	@ echo "=== Building binaries ==="
 	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) bin
 	@ echo "=== Running regressions ==="
 	+@ $(regressdir)/check.sh $(regressdir) $(build_dir)/bin
+
+delegate-regress: build_subdirs version
+	@ echo "=== Building binaries ==="
+	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) bin
+	@ echo "=== Running delegate-only regressions ==="
+	+@ REGRESS_DELEGATE_MODE=only $(regressdir)/check.sh $(regressdir) $(build_dir)/bin
 
 
 mcsat-regress: build_subdirs version
@@ -320,12 +334,25 @@ mcsat-regress: build_subdirs version
 	@ echo "=== Running regressions ==="
 	+@ $(regressdir)/check.sh $(regressdir_mcsat) $(build_dir)/bin
 
+# The regressions of the TRA plugin only
+tra-regress: build_subdirs version
+	@ echo "=== Building binaries ==="
+	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) bin
+	@ echo "=== Running TRA regressions ==="
+	+@ $(regressdir)/check.sh $(regressdir_tra) $(build_dir)/bin
+
 
 static-regress: static_build_subdirs version
 	@ echo "=== Building binaries ==="
 	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) static-bin
 	@ echo "=== Running regressions ==="
 	+@ $(regressdir)/check.sh $(regressdir) $(build_dir)/static_bin
+
+static-delegate-regress: static_build_subdirs version
+	@ echo "=== Building binaries ==="
+	@ $(MAKE) -C $(srcdir) BUILD=../$(build_dir) static-bin
+	@ echo "=== Running delegate-only regressions ==="
+	+@ REGRESS_DELEGATE_MODE=only $(regressdir)/check.sh $(regressdir) $(build_dir)/static_bin
 
 
 static-mcsat-regress: static_build_subdirs version
@@ -336,7 +363,9 @@ static-mcsat-regress: static_build_subdirs version
 
 
 .PHONY: all obj static-obj lib static-lib bin static-bin test static-test \
-    regress static-regress check static-check check-api static-check-api
+    regress delegate-regress static-regress static-delegate-regress \
+    check delegate-check static-check static-delegate-check \
+    check-api static-check-api
 
 
 #
@@ -466,22 +495,19 @@ static-tarfile: $(distributions) doc
 
 
 #
-# Install from the source.
+# Install from the source: only the binary of YicesTRA, ytra.
 #
-# The target directories are determined by ./configure:
+# The target directory is determined by ./configure:
 #   bindir = where to put binaries
-#   libdir = where to put the libraries
-#   includedir = where to put the include files
 #
-# We assume 'make binary-distribution' was done first,
-# then we copy the $(dist_dir) content:
-#   $(dist_dir)/bin     into $(bindir)
-#   $(dist_dir)/lib     into $(libdir)
-#   $(dist_dir)/include into $(includedir)
+# We assume 'make' (or 'make binary-distribution') was done first,
+# then we copy $(dist_dir)/bin/ytra into $(bindir). The binary is linked
+# statically with libyices, so neither the library nor its headers are
+# installed.
 #
-# Note: the default bindir, libdir, includedir are set by the
-# configure script, and are imported from $(YICES_MAKE_INCLUDE).
-# These defaults can be changed by using 'make install prefix=...'
+# Note: the default bindir is set by the configure script, and is
+# imported from $(YICES_MAKE_INCLUDE). It can be changed by using
+# 'make install prefix=...'
 #
 # We also (try to) support the DESTDIR convention.
 #
@@ -495,45 +521,16 @@ install: install-$(POSIXOS)
 
 install-default:
 	$(MKDIR_P) $(DESTDIR)$(bindir)
-	$(MKDIR_P) $(DESTDIR)$(libdir)
-	$(MKDIR_P) $(DESTDIR)$(includedir)
-	$(INSTALL) -m 664 $(dist_dir)/include/* $(DESTDIR)$(includedir)
-	$(INSTALL) $(dist_dir)/bin/* $(DESTDIR)$(bindir)
-	$(INSTALL) $(dist_dir)/lib/* $(DESTDIR)$(libdir)
+	$(INSTALL) $(dist_dir)/bin/ytra$(EXEEXT) $(DESTDIR)$(bindir)
 
-install-darwin: install-default
-	(cd $(DESTDIR)$(libdir) && $(LN_S) -f libyices.$(MAJOR).dylib libyices.dylib)
-
-install-solaris: install-default
-	$(LDCONFIG) -n $(DESTDIR)$(libdir) && (cd $(DESTDIR)$(libdir) && $(LN_S) -f libyices.so.$(YICES_VERSION) libyices.so)
-
-# Avoid ldconfig as it's not present on musl. We create the following symlinks:
-# - libyices.so.X.Y.Z -> libyices.so.X.Y
-# - libyices.so.X.Y   -> libyices.so
-install-linux install-unix: install-default
-	(cd $(DESTDIR)$(libdir) && $(LN_S) -f libyices.so.$(YICES_VERSION) libyices.so.$(MAJOR).$(MINOR) && $(LN_S) -f libyices.so.$(MAJOR).$(MINOR) libyices.so)
-
-# on FreeBSD: the library file is libyices.so.X.Y and ldconfig does not take -n
-# TODO: fix this. We must also create a symbolic link: libyices.so.X in libdir
-# the ldconfig manpage on FreeBSD says 'filenames must conform to the lib*.so.[0-9] pattern in order to
-# be added to the hints file.' In other words, ldconfig on FreeBSD doesn't create the symbolic link,
-# as on Linux.
-install-freebsd: install-default
-	(cd $(DESTDIR)$(libdir) && $(LN_S) -f libyices.so.$(MAJOR) libyices.so)
-
-install-netbsd: install-default
-	(cd $(DESTDIR)$(libdir) && $(LN_S) -f libyices.so.$(YICES_VERSION) libyices.so)
+install-darwin install-solaris install-linux install-unix install-freebsd install-netbsd: install-default
 
 #
-# cygwin and mingw install: copy the DLLs in $(bindir)
+# cygwin and mingw install: also copy the DLLs of $(dist_dir)/bin, which ytra may need
 #
 install-cygwin: $(build_dir) $(dist_dir)
 	$(MKDIR_P) $(DESTDIR)$(bindir)
-	$(MKDIR_P) $(DESTDIR)$(libdir)
-	$(MKDIR_P) $(DESTDIR)$(includedir)
-	$(INSTALL) -m 664 $(dist_dir)/include/* $(DESTDIR)$(includedir)
-	$(INSTALL) $(dist_dir)/bin/* $(DESTDIR)$(bindir)
-	$(INSTALL) $(dist_dir)/lib/*.a $(DESTDIR)$(libdir)
+	$(INSTALL) $(dist_dir)/bin/ytra$(EXEEXT) $(wildcard $(dist_dir)/bin/*.dll) $(DESTDIR)$(bindir)
 
 install-mingw: install-cygwin
 
@@ -570,6 +567,8 @@ source-distribution: $(distributions) doc
 	cp Makefile Makefile.build make.include.in $(srcdist_dir)
 	$(MKDIR_P) $(srcdist_dir)/autoconf
 	cp autoconf/* $(srcdist_dir)/autoconf
+	$(MKDIR_P) $(srcdist_dir)/scripts
+	cp scripts/rewrite-kissat-kitten-symbols.sh $(srcdist_dir)/scripts
 	$(MKDIR_P) $(srcdist_dir)/configs
 	$(MKDIR_P) $(srcdist_dir)/etc
 	cp etc/README.source $(srcdist_dir)/README
@@ -668,8 +667,8 @@ show-details:
 	@ echo "  LN_S     = $(LN_S)"
 	@ echo "  MKDIR_P  = $(MKDIR_P)"
 	@ echo "  CC       = $(CC)"
-	@ echo "  CPPFLAGS = $(CPPFLAGS)"
 	@ echo "  CFLAGS   = $(CFLAGS)"
+	@ echo "  CPPFLAGS = $(CPPFLAGS)"
 	@ echo "  LIBS     = $(LIBS)"
 	@ echo "  LDFLAGS  = $(LDFLAGS)"
 	@ echo "  LD       = $(LD)"
@@ -693,6 +692,17 @@ show-details:
 	@ echo
 	@ echo "  PIC_LIBPOLY = $(PIC_LIBPOLY)"
 	@ echo "  PIC_LIBPOLY_INCLUDE_DIR = $(PIC_LIBPOLY_INCLUDE_DIR)"
+	@ echo
+	@ echo "  HAVE_CADICAL_DELEGATE = $(HAVE_CADICAL_DELEGATE)"
+	@ echo "  HAVE_CRYPTOMINISAT_DELEGATE = $(HAVE_CRYPTOMINISAT_DELEGATE)"
+	@ echo "  HAVE_KISSAT_DELEGATE = $(HAVE_KISSAT_DELEGATE)"
+	@ echo "  STATIC_DEPDIR = $(STATIC_DEPDIR)"
+	@ echo "  STATIC_DELEGATES_INCLUDE_DIR = $(STATIC_DELEGATES_INCLUDE_DIR)"
+	@ echo "  STATIC_CADICAL_RAW = $(STATIC_CADICAL_RAW)"
+	@ echo "  STATIC_CRYPTOMINISAT_RAW = $(STATIC_CRYPTOMINISAT_RAW)"
+	@ echo "  STATIC_KISSAT_RAW = $(STATIC_KISSAT_RAW)"
+	@ echo "  STATIC_KISSAT_YICES = $(STATIC_KISSAT_YICES)"
+	@ echo "  DYNAMIC_DELEGATES_ASSUME_HIDDEN_KITTEN = $(DYNAMIC_DELEGATES_ASSUME_HIDDEN_KITTEN)"
 	@ echo
 
 

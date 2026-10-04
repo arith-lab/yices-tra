@@ -29,7 +29,7 @@
 /**
  * Structure to evaluate bit-vector constraints based on the current trail.
  */
-typedef struct bv_evaluator_t {
+typedef struct bv_evaluator_s {
 
   /** The context for evaluation */
   const plugin_context_t* ctx;

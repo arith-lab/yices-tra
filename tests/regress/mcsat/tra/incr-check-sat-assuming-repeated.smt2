@@ -1,0 +1,12 @@
+; Repeated check-sat-assuming (literal path).
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(declare-fun a () Bool)
+(declare-fun b () Bool)
+(assert (=> a (> (exp x) 10)))
+(assert (=> b (< x 2)))
+(check-sat-assuming (a b))
+(check-sat-assuming (a))
+(check-sat-assuming (b))
+(check-sat-assuming (a b))
+(check-sat)

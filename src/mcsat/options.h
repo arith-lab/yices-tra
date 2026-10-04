@@ -36,11 +36,11 @@ typedef struct mcsat_options_s {
   int32_t bv_var_size;
   bool model_interpolation;
   bool partial_restart;
-  double bool_freq;
-  bool nta_delta_set;
-  int32_t nta_delta;
-  bool div_neq0;
-  bool no_sin_period;
+
+  bool bool_delta_mode; // The TRA plugin always runs in delta mode internally. If this is false, the solver never returns delta-sat: it refines delta and restarts instead.
+  int32_t delta_precision;
+
+  bool l2o;
 } mcsat_options_t;
 
 /** Initialize options with default values. */

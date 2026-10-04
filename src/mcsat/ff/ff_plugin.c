@@ -784,12 +784,15 @@ void ff_plugin_decide(plugin_t* plugin, variable_t x, trail_token_t* decide_toke
   const mcsat_value_t *x_new = NULL;
   mcsat_value_t x_new_local;
 
-  // see if there is a fitting cached value
-  if (trail_has_cached_value(ff->ctx->trail, x)) {
-    x_new = trail_get_cached_value(ff->ctx->trail, x);
-    assert(x_new->type == VALUE_LIBPOLY);
-    assert(x_new->lp_value.type == LP_VALUE_INTEGER);
-    if (feasible == NULL || lp_feasibility_set_int_contains(feasible, &x_new->lp_value.value.z)) {
+  // see if there is a fitting cached value: the trail returns the cached hints in
+  // priority order; check each against the feasible set and take the first fit.
+  const mcsat_value_t* x_candidates[2];
+  uint32_t x_num_candidates = trail_get_cached_candidates(ff->ctx->trail, x, x_candidates);
+  for (uint32_t i = 0; i < x_num_candidates && !using_cached; ++i) {
+    assert(x_candidates[i]->type == VALUE_LIBPOLY);
+    assert(x_candidates[i]->lp_value.type == LP_VALUE_INTEGER);
+    if (feasible == NULL || lp_feasibility_set_int_contains(feasible, &x_candidates[i]->lp_value.value.z)) {
+      x_new = x_candidates[i];
       using_cached = true;
     }
   }
@@ -916,8 +919,9 @@ term_t ff_plugin_explain_propagation(plugin_t* plugin, variable_t var, ivector_t
 }
 
 static
-bool ff_plugin_explain_evaluation(plugin_t* plugin, term_t t, int_mset_t* vars, mcsat_value_t* value) {
+bool ff_plugin_explain_evaluation(plugin_t* plugin, term_t t, int_mset_t* vars, const mcsat_value_t* value) {
   ff_plugin_t* ff = (ff_plugin_t*) plugin;
+  (void) value;
 
   bool result = true;
 
@@ -1045,6 +1049,8 @@ void ff_plugin_event_notify(plugin_t* plugin, plugin_notify_kind_t kind) {
       break;
     case MCSAT_SOLVER_POP:
       // Not much to do
+      break;
+    case MCSAT_DELTA_BUMP:
       break;
     default:
       assert(false);

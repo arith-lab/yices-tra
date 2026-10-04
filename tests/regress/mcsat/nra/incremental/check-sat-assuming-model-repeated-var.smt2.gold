@@ -1,0 +1,2 @@
+(error "a variable is given twice in check-sat-assuming-model")
+sat

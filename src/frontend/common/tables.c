@@ -100,6 +100,8 @@ const char * const code2error[NUM_INTERNALIZATION_ERRORS] = {
   "arithmetic solver exception",
   "bitvector solver exception",
   "formula not supported by the mc-sat solver",
+  "high-order functions not supported",
+  "theory not supported by the context",
 };
 
 /*

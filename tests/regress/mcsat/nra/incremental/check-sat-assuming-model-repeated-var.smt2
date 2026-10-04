@@ -1,0 +1,6 @@
+(set-logic QF_NRA)
+(declare-fun x () Real)
+(declare-fun y () Real)
+(assert (> (* x x) 1.0))
+(check-sat-assuming-model (x y x) (2.0 1.0 3.0))
+(check-sat-assuming-model (x y) (2.0 1.0))

@@ -1,0 +1,12 @@
+; As incr-exp-bounds-inconsistent, with a purified argument in the popped scope.
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(declare-fun y () Real)
+(push 1)
+(assert (and (> (exp (+ x 1)) 5) (< x 0) (> x 1)))
+(check-sat)
+(pop 1)
+(assert (> (exp y) 3))
+(check-sat)
+(assert (= y 1))
+(check-sat)

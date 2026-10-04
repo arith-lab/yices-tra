@@ -1,0 +1,11 @@
+; check-sat-assuming-model on a solved alias after a pop.
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(declare-fun s () Real)
+(push 1)
+(assert (> (sin x) 0.9))
+(check-sat)
+(pop 1)
+(assert (= s (sin x)))
+(check-sat-assuming-model (x s) (0.5 0.7))
+(check-sat)

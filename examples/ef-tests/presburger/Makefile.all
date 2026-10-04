@@ -1,6 +1,6 @@
 #VALGRIND=valgrind --leak-check=full --show-leak-kinds=all
 VALGRIND=
-YICES_SMT2=${VALGRIND} ../../../build/x86_64-apple-darwin13.4.0-debug/bin/yices_smt2
+YICES_SMT2=${VALGRIND} ../../../build/x86_64-apple-darwin13.4.0-debug/bin/ytra
 YICES_MAIN=${VALGRIND} ../../../build/x86_64-apple-darwin13.4.0-debug/bin/yices_main  --mode=ef
 CVC4=cvc4 --produce-models
 Z3=/Users/iam/Repositories/z3/build/z3

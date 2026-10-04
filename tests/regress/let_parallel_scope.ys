@@ -1,0 +1,6 @@
+; A let with several bindings must remove all of its names when it ends: before the fix, the
+; first binding (x := 0) stayed visible, so (> x 3) was read as (> 0 3) (unsat).
+(define x::real)
+(assert (let ((x 0) (u 1)) (< u 2)))
+(assert (> x 3))
+(check)

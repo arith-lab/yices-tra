@@ -986,6 +986,28 @@ static term_t ef_generalize2(ef_prob_t *prob, term_t cex_cnstr, uint32_t i, term
 
 
 /*
+ * Check whether constraint i has an existential variable of function type.
+ * Projection-based generalization can't build a concrete model that assigns
+ * such a variable a value, so it can't handle these problems.
+ */
+static bool ef_cnstr_has_function_evar(ef_solver_t *solver, uint32_t i) {
+  ef_cnstr_t *cnstr;
+  term_table_t *terms;
+  uint32_t j, n;
+
+  terms = solver->prob->terms;
+  cnstr = solver->prob->cnstr + i;
+  n = ef_constraint_num_evars(cnstr);
+  for (j=0; j<n; j++) {
+    if (is_function_term(terms, cnstr->evars[j])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+
+/*
  * Option 3: generalize by computing an implicant then
  * applying projection.
  */
@@ -1013,6 +1035,15 @@ static term_t ef_generalize3(ef_solver_t *solver, term_t cex_cnstr, uint32_t i) 
   assert(n == solver->all_values.size);
   mdl = yices_model_from_map(n, solver->all_vars.data, solver->all_values.data);
   if (mdl == NULL) {
+    if (ef_cnstr_has_function_evar(solver, i)) {
+      // An existential variable is an uninterpreted function; its value can't be
+      // represented in the concrete map needed for projection, so we can't
+      // refine the exists context and make progress. Report 'unknown' rather
+      // than a spurious bug: this combination of an uninterpreted-function
+      // existential with arithmetic universals is not supported by the ef-solver.
+      solver->status = EF_STATUS_UNKNOWN;
+      return NULL_TERM;
+    }
     // error in the model construction
     solver->status = EF_STATUS_MDL_ERROR;
     solver->error_code = yices_error_code();
@@ -1062,6 +1093,17 @@ static term_t ef_generalize3(ef_solver_t *solver, term_t cex_cnstr, uint32_t i) 
 
   code = 0;
   pflag = project_literals(mdl, solver->prob->manager, v->size, v->data, n, cnstr->uvars, w, &code);
+
+  if (pflag == PROJ_ERROR_UNSUPPORTED_ARITH_TERM) {
+    // Keep normal projection behavior, but recover from unsupported terms.
+    result = ef_generalize2(solver->prob, cex_cnstr, i, solver->uvalue_aux.data);
+    if (result < 0) {
+      solver->status = EF_STATUS_SUBST_ERROR;
+      solver->error_code = result;
+      return NULL_TERM;
+    }
+    return result;
+  }
 
   if (pflag != PROJ_NO_ERROR) {
     solver->status = EF_STATUS_PROJECTION_ERROR;
@@ -1322,6 +1364,10 @@ static smt_status_t ef_solver_test_exists_model(ef_solver_t *solver, term_t doma
     // if reached highest generation, then break
     if (done)
       break;
+
+    if (status == YICES_STATUS_INTERRUPTED) {
+      break;
+    }
 
     uvar_cnstr_old = uvar_cnstr;
     generation++;

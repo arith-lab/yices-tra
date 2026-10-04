@@ -64,6 +64,7 @@ void init_int_hset(int_hset_t *set, uint32_t n) {
   set->nelems = 0;
   set->z_flag = false;
   set->resize_threshold = (uint32_t)(n * INT_HSET_RESIZE_RATIO);
+  set->is_closed = false;
 }
 
 
@@ -193,6 +194,7 @@ static void hset_extend(int_hset_t *set) {
  * External function: check whether x is present in set
  */
 bool int_hset_member(int_hset_t *set, uint32_t x) {
+  assert(!set->is_closed);
   if (x == 0) {
     return set->z_flag;
   }
@@ -205,6 +207,7 @@ bool int_hset_member(int_hset_t *set, uint32_t x) {
  * that is, if x is not present already.
  */
 bool int_hset_add(int_hset_t *set, uint32_t x) {
+  assert(!set->is_closed);
   bool result;
 
   if (x == 0) {
@@ -232,6 +235,10 @@ bool int_hset_add(int_hset_t *set, uint32_t x) {
  * 2) if z_flag is set, copy 0 into data[nelems], then increment nelems
  */
 void int_hset_close(int_hset_t *set) {
+  if(set->is_closed == true){
+    return;
+  }
+
   uint32_t i, j, n, x, *a;
 
   n = set->size;
@@ -251,6 +258,8 @@ void int_hset_close(int_hset_t *set) {
     i ++;
     set->nelems = i;
   }
+
+  set->is_closed = true;
 }
 
 
@@ -280,4 +289,5 @@ void int_hset_reset(int_hset_t *set) {
 
   set->nelems = 0;
   set->z_flag = false;
+  set->is_closed = false;
 }

@@ -1,5 +1,5 @@
-yices2 (2.7.0-0ubuntu1) jammy; urgency=medium
+yices-tra (1.0.0-1) unstable; urgency=medium
 
-  * Yices2.7.0 Release
+  * YicesTRA 1.0.0 release, based on Yices 2.7.0.
 
- -- Ahmed Irfan <ahmed.irfan@sri.com>  Wed, 16 Jul 2025 13:46:30 +0000
+ -- Alessio Mansutti <alessio.mansutti@imdea.org>  Sat, 26 Sep 2026 23:00:00 +0200

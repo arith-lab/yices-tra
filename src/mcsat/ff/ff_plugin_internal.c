@@ -20,6 +20,9 @@
 
 #include "mcsat/tracing.h"
 
+static
+void ff_plugin_get_term_variables(ff_plugin_t* ff, term_t t, int_mset_t* vars_out);
+
 void ff_plugin_get_constraint_variables(ff_plugin_t* ff, term_t constraint, int_mset_t* vars_out) {
 
   term_table_t* terms = ff->ctx->terms;
@@ -44,6 +47,7 @@ void ff_plugin_get_constraint_variables(ff_plugin_t* ff, term_t constraint, int_
   }
 }
 
+static
 void ff_plugin_get_term_variables(ff_plugin_t* ff, term_t t, int_mset_t* vars_out) {
 
   // The term table

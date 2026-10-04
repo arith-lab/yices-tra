@@ -22,6 +22,7 @@
  */
 
 #include <inttypes.h>
+#include <string.h>
 
 #include "model/concrete_values.h"
 #include "terms/bv64_constants.h"
@@ -578,6 +579,8 @@ static void hset_normalize(map_hset_t *hset) {
  * - ttbl = attached type table.
  */
 void init_value_table(value_table_t *table, uint32_t n, type_table_t *ttbl) {
+  uint32_t i;
+
   if (n == 0) {
     n = DEF_VALUE_TABLE_SIZE;
   }
@@ -589,6 +592,10 @@ void init_value_table(value_table_t *table, uint32_t n, type_table_t *ttbl) {
   table->nobjects = 0;
   table->kind = (uint8_t *) safe_malloc(n * sizeof(uint8_t));
   table->desc = (value_desc_t *) safe_malloc(n * sizeof(value_desc_t));
+  table->type_cache = (type_t *) safe_malloc(n * sizeof(type_t));
+  for (i=0; i<n; i++) {
+    table->type_cache[i] = NULL_TYPE;
+  }
   table->canonical = allocate_bitvector0(n);
 
   table->type_table = ttbl;
@@ -620,8 +627,9 @@ void init_value_table(value_table_t *table, uint32_t n, type_table_t *ttbl) {
  * Make the table larger (by 50%)
  */
 static void extend_value_table(value_table_t *table) {
-  uint32_t n;
+  uint32_t i, n, old_n;
 
+  old_n = table->size;
   n = table->size + 1;
   n += n>>1;
   assert(n > table->size);
@@ -633,7 +641,11 @@ static void extend_value_table(value_table_t *table) {
   table->size = n;
   table->kind = (uint8_t *) safe_realloc(table->kind, n * sizeof(uint8_t));
   table->desc = (value_desc_t *) safe_realloc(table->desc, n * sizeof(value_desc_t));
-  table->canonical = extend_bitvector0(table->canonical, n, table->size);
+  table->type_cache = (type_t *) safe_realloc(table->type_cache, n * sizeof(type_t));
+  for (i=old_n; i<n; i++) {
+    table->type_cache[i] = NULL_TYPE;
+  }
+  table->canonical = extend_bitvector0(table->canonical, n, old_n);
 }
 
 
@@ -649,6 +661,7 @@ static value_t allocate_object(value_table_t *table) {
     extend_value_table(table);
   }
   assert(i < table->size);
+  table->type_cache[i] = NULL_TYPE;
   table->nobjects = i+1;
   return i;
 }
@@ -779,6 +792,8 @@ static void vtbl_delete_descriptors(value_table_t *table, uint32_t k) {
  * - empty the table.
  */
 void reset_value_table(value_table_t *table) {
+  uint32_t i;
+
   vtbl_delete_descriptors(table, 0);
   reset_int_htbl(&table->htbl);
   reset_map_htbl(&table->mtbl);
@@ -788,6 +803,9 @@ void reset_value_table(value_table_t *table) {
   ivector_reset(&table->aux_vector);
 
   table->nobjects = 0;
+  for (i=0; i<table->size; i++) {
+    table->type_cache[i] = NULL_TYPE;
+  }
   table->unknown_value = null_value;
   table->true_value = null_value;
   table->false_value = null_value;
@@ -802,6 +820,7 @@ void delete_value_table(value_table_t *table) {
   vtbl_delete_descriptors(table, 0);
   safe_free(table->kind);
   safe_free(table->desc);
+  safe_free(table->type_cache);
   delete_bitvector(table->canonical);
   delete_int_htbl(&table->htbl);
   delete_bvconstant(&table->buffer);
@@ -811,7 +830,299 @@ void delete_value_table(value_table_t *table) {
   delete_hsets(table);
   table->kind = NULL;
   table->desc = NULL;
+  table->type_cache = NULL;
   table->canonical = NULL;
+}
+
+
+
+/*****************
+ *  VALUE COPIER *
+ ****************/
+
+/*
+ * The copier is shared by API operations that move model-local value DAGs
+ * across value tables. It preserves sharing within one copy session.
+ */
+void init_vtbl_copy(vtbl_copy_t *copy, value_table_t *src, value_table_t *dst) {
+  assert(src->type_table == dst->type_table);
+
+  copy->src = src;
+  copy->dst = dst;
+  init_int_hmap(&copy->cache, 0);
+}
+
+void delete_vtbl_copy(vtbl_copy_t *copy) {
+  delete_int_hmap(&copy->cache);
+  copy->src = NULL;
+  copy->dst = NULL;
+}
+
+static void vtbl_copy_cache(vtbl_copy_t *copy, value_t src, value_t dst) {
+  int_hmap_add(&copy->cache, src, dst);
+}
+
+static value_t vtbl_copy_cached_value(vtbl_copy_t *copy, value_t src) {
+  int_hmap_pair_t *p;
+
+  p = int_hmap_find(&copy->cache, src);
+  if (p != NULL) {
+    return p->val;
+  }
+  return null_value;
+}
+
+static value_t vtbl_copy_bitvector(vtbl_copy_t *copy, value_bv_t *bv) {
+  uint32_t *data;
+  value_t v;
+
+  data = (uint32_t *) safe_malloc(bv->width * sizeof(uint32_t));
+  memcpy(data, bv->data, bv->width * sizeof(uint32_t));
+  v = vtbl_mk_bv_from_bv(copy->dst, bv->nbits, data);
+  safe_free(data);
+
+  return v;
+}
+
+static value_t vtbl_copy_tuple_value(vtbl_copy_t *copy, value_tuple_t *tuple) {
+  value_t *elem;
+  value_t v;
+  uint32_t i, n;
+
+  n = tuple->nelems;
+  elem = (value_t *) safe_malloc(n * sizeof(value_t));
+  for (i=0; i<n; i++) {
+    elem[i] = vtbl_copy_value(copy, tuple->elem[i]);
+  }
+
+  v = vtbl_mk_tuple(copy->dst, n, elem);
+  safe_free(elem);
+
+  return v;
+}
+
+static value_t vtbl_copy_map_value(vtbl_copy_t *copy, value_map_t *map) {
+  value_t *arg;
+  value_t val, v;
+  uint32_t i, n;
+
+  n = map->arity;
+  arg = (value_t *) safe_malloc(n * sizeof(value_t));
+  for (i=0; i<n; i++) {
+    arg[i] = vtbl_copy_value(copy, map->arg[i]);
+  }
+  val = vtbl_copy_value(copy, map->val);
+
+  v = vtbl_mk_map(copy->dst, n, arg, val);
+  safe_free(arg);
+
+  return v;
+}
+
+static value_t vtbl_copy_function_value(vtbl_copy_t *copy, value_fun_t *fun) {
+  value_t *map;
+  value_t def, v;
+  uint32_t i, n;
+
+  n = fun->map_size;
+  map = (value_t *) safe_malloc(n * sizeof(value_t));
+  for (i=0; i<n; i++) {
+    map[i] = vtbl_copy_value(copy, fun->map[i]);
+  }
+  def = vtbl_copy_value(copy, fun->def);
+
+  v = vtbl_mk_function(copy->dst, fun->type, n, map, def);
+  safe_free(map);
+
+  if (fun->name != NULL && object_is_function(copy->dst, v)) {
+    vtbl_set_function_name(copy->dst, v, fun->name);
+  }
+
+  return v;
+}
+
+static value_t vtbl_copy_update_value(vtbl_copy_t *copy, value_update_t *upd) {
+  value_map_t *map;
+  value_t *arg;
+  value_t fun, val, v;
+  uint32_t i, n;
+
+  fun = vtbl_copy_value(copy, upd->fun);
+  map = vtbl_map(copy->src, upd->map);
+  n = map->arity;
+
+  arg = (value_t *) safe_malloc(n * sizeof(value_t));
+  for (i=0; i<n; i++) {
+    arg[i] = vtbl_copy_value(copy, map->arg[i]);
+  }
+  val = vtbl_copy_value(copy, map->val);
+
+  v = vtbl_mk_update(copy->dst, fun, n, arg, val);
+  safe_free(arg);
+
+  return v;
+}
+
+value_t vtbl_copy_value(vtbl_copy_t *copy, value_t v) {
+  value_table_t *src;
+  value_t result;
+  value_ff_t *ff;
+  value_unint_t *unint;
+
+  src = copy->src;
+  assert(good_object(src, v));
+
+  result = vtbl_copy_cached_value(copy, v);
+  if (result >= 0) {
+    return result;
+  }
+
+  switch (object_kind(src, v)) {
+  case UNKNOWN_VALUE:
+    result = vtbl_mk_unknown(copy->dst);
+    break;
+
+  case BOOLEAN_VALUE:
+    result = vtbl_mk_bool(copy->dst, boolobj_value(src, v));
+    break;
+
+  case RATIONAL_VALUE:
+    result = vtbl_mk_rational(copy->dst, vtbl_rational(src, v));
+    break;
+
+  case ALGEBRAIC_VALUE:
+#ifdef HAVE_MCSAT
+    result = vtbl_mk_algebraic(copy->dst, vtbl_algebraic_number(src, v));
+#else
+    assert(false);
+    result = null_value;
+#endif
+    break;
+
+  case FINITEFIELD_VALUE:
+    ff = vtbl_finitefield(src, v);
+    result = vtbl_mk_finitefield(copy->dst, &ff->value, &ff->mod);
+    break;
+
+  case BITVECTOR_VALUE:
+    result = vtbl_copy_bitvector(copy, vtbl_bitvector(src, v));
+    break;
+
+  case TUPLE_VALUE:
+    result = vtbl_copy_tuple_value(copy, vtbl_tuple(src, v));
+    break;
+
+  case UNINTERPRETED_VALUE:
+    unint = vtbl_unint(src, v);
+    result = vtbl_mk_const(copy->dst, unint->type, unint->index, unint->name);
+    break;
+
+  case MAP_VALUE:
+    result = vtbl_copy_map_value(copy, vtbl_map(src, v));
+    break;
+
+  case FUNCTION_VALUE:
+    result = vtbl_copy_function_value(copy, vtbl_function(src, v));
+    break;
+
+  case UPDATE_VALUE:
+    result = vtbl_copy_update_value(copy, vtbl_update(src, v));
+    break;
+
+  default:
+    assert(false);
+    result = null_value;
+    break;
+  }
+
+  assert(result >= 0);
+  vtbl_copy_cache(copy, v, result);
+
+  return result;
+}
+
+/*
+ * Compute and cache the type of value v.
+ * - returns NULL_TYPE if no type can be inferred.
+ */
+type_t vtbl_value_type(value_table_t *table, value_t v) {
+  type_t tau;
+  type_t *a;
+  value_kind_t kind;
+  value_tuple_t *tuple;
+  value_unint_t *u;
+  value_fun_t *fun;
+  value_ff_t *v_ff;
+  uint32_t i, n;
+
+  assert(good_object(table, v));
+
+  tau = table->type_cache[v];
+  if (tau != NULL_TYPE) {
+    return tau;
+  }
+
+  kind = object_kind(table, v);
+  switch (kind) {
+  case BOOLEAN_VALUE:
+    tau = bool_type(table->type_table);
+    break;
+
+  case RATIONAL_VALUE:
+    tau = object_is_integer(table, v) ? int_type(table->type_table) : real_type(table->type_table);
+    break;
+
+  case ALGEBRAIC_VALUE:
+    tau = real_type(table->type_table);
+    break;
+
+  case FINITEFIELD_VALUE:
+    v_ff = vtbl_finitefield(table, v);
+    tau = ff_type_r(table->type_table, &v_ff->mod);
+    break;
+
+  case BITVECTOR_VALUE:
+    tau = bv_type(table->type_table, vtbl_bitvector(table, v)->nbits);
+    break;
+
+  case UNINTERPRETED_VALUE:
+    u = vtbl_unint(table, v);
+    tau = u->type;
+    break;
+
+  case TUPLE_VALUE:
+    tuple = vtbl_tuple(table, v);
+    n = tuple->nelems;
+    a = (type_t *) safe_malloc(n * sizeof(type_t));
+    for (i=0; i<n; i++) {
+      a[i] = vtbl_value_type(table, tuple->elem[i]);
+      if (a[i] == NULL_TYPE) {
+        safe_free(a);
+        return NULL_TYPE;
+      }
+    }
+    tau = tuple_type(table->type_table, n, a);
+    safe_free(a);
+    break;
+
+  case FUNCTION_VALUE:
+    fun = vtbl_function(table, v);
+    tau = fun->type;
+    break;
+
+  case UPDATE_VALUE:
+    tau = vtbl_function_type(table, v);
+    break;
+
+  case UNKNOWN_VALUE:
+  case MAP_VALUE:
+  default:
+    tau = NULL_TYPE;
+    break;
+  }
+
+  table->type_cache[v] = tau;
+  return tau;
 }
 
 
@@ -1011,6 +1322,32 @@ void vtbl_expand_update(value_table_t *table, value_t i, value_t *def, type_t *t
   hset = get_hset1(table);
   reset_map_hset(hset);
   normalize_update(table, i, hset, def, tau);
+}
+
+
+/*
+ * Expand update c and return a private copy of the resulting mapping list.
+ * See concrete_values.h for the rationale and ownership rules.
+ */
+value_t *vtbl_copy_update_maps(value_table_t *table, value_t c, value_t *def, type_t *tau, uint32_t *n) {
+  map_hset_t *hset;
+  value_t *maps;
+  uint32_t i;
+
+  vtbl_expand_update(table, c, def, tau);
+  hset = table->hset1;
+  assert(hset != NULL);
+
+  *n = hset->nelems;
+  if (*n == 0) {
+    return NULL;
+  }
+
+  maps = (value_t *) safe_malloc(*n * sizeof(value_t));
+  for (i = 0; i < *n; ++i) {
+    maps[i] = hset->data[i];
+  }
+  return maps;
 }
 
 
@@ -1632,7 +1969,7 @@ static value_t build_finitefield_value(ff_hobj_t *o) {
   value_ff_t *v_ff;
   value_t i;
 
-  v_ff = (value_ff_t *) safe_malloc(sizeof(value_bv_t));
+  v_ff = (value_ff_t *) safe_malloc(sizeof(value_ff_t));
   q_init(&v_ff->value);
   q_init(&v_ff->mod);
   q_set(&v_ff->value, o->v);
@@ -2275,31 +2612,39 @@ void vtbl_set_zero_mod(value_table_t *table, value_t f) {
 
 /*
  * Set a default interpretation for the divide-by-zero functions.
- * The default is (rdiv x 0) = 0  (idiv x 0) = 0 and (mod x 0) = 0 for all real x.
+ * The default is (rdiv x 0) = 0 for all real x, and
+ * (idiv x 0) = 0 and (mod x 0) = 0 for all integer x.
  * - if any of the zero_div function is already assigned, it is kept.
  */
 void vtbl_set_default_zero_divide(value_table_t *table) {
   value_t f, z;
-  type_t tau;
+  type_t real, integer, tau;
 
   if (table->zero_rdiv_fun == null_value ||
       table->zero_idiv_fun == null_value ||
       table->zero_mod_fun == null_value) {
-    tau = real_type(table->type_table);
-    tau = function_type(table->type_table, tau, 1, &tau); // [real -> real]
-
     z = vtbl_mk_int32(table, 0);
-    f = vtbl_mk_constant_function(table, tau, z);
-    assert(is_plausible_div_by_zero(table, f));
 
     if (table->zero_rdiv_fun == null_value) {
+      real = real_type(table->type_table);
+      tau = function_type(table->type_table, real, 1, &real); // [real -> real]
+      f = vtbl_mk_constant_function(table, tau, z);
+      assert(is_plausible_div_by_zero(table, f));
       table->zero_rdiv_fun = f;
     }
-    if (table->zero_idiv_fun == null_value) {
-      table->zero_idiv_fun = f;
-    }
-    if (table->zero_mod_fun == null_value) {
-      table->zero_mod_fun = f;
+    if (table->zero_idiv_fun == null_value ||
+        table->zero_mod_fun == null_value) {
+      integer = int_type(table->type_table);
+      tau = function_type(table->type_table, integer, 1, &integer); // [int -> int]
+      f = vtbl_mk_constant_function(table, tau, z);
+      assert(is_plausible_div_by_zero(table, f));
+
+      if (table->zero_idiv_fun == null_value) {
+        table->zero_idiv_fun = f;
+      }
+      if (table->zero_mod_fun == null_value) {
+        table->zero_mod_fun = f;
+      }
     }
   }
 }

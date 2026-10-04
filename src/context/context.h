@@ -58,11 +58,25 @@ extern bool context_arch_has_mcsat(context_arch_t arch);
 extern void init_context(context_t *ctx, term_table_t *terms, smt_logic_t logic,
                          context_mode_t mode, context_arch_t arch, bool qflag);
 
+/*
+ * Attach the supplemental MCSAT E-graph satellite.
+ * This must be called before assertions/search; it is a construction-time
+ * configuration step, not an assertion-time activation path.
+ */
+extern int32_t context_attach_mcsat_supplement(context_t *ctx);
+
 
 /*
  * Deletion
  */
 extern void delete_context(context_t *ctx);
+
+/*
+ * Release delegate runtime state (if any).
+ */
+extern void context_sat_delegate_state_cleanup(context_t *ctx);
+extern void context_reset_sat_delegate_stats(context_t *ctx);
+extern void context_get_sat_delegate_stats(const context_t *ctx, sat_delegate_stats_t *stats);
 
 
 /*
@@ -142,7 +156,6 @@ extern bool context_has_simplex_solver(context_t *ctx);
  *   not be processed.
  */
 extern int32_t assert_formula(context_t *ctx, term_t f);
-
 
 /*
  * Assert all formulas f[0] ... f[n-1]
@@ -224,6 +237,13 @@ extern smt_status_t check_context(context_t *ctx, const param_t *parameters);
  * If status is YICES_STATUS_UNSAT then the assumptions are inconsistent
  */
 extern smt_status_t check_context_with_assumptions(context_t *ctx, const param_t *parameters, uint32_t n, const literal_t *a);
+
+/*
+ * Check under assumptions given as Boolean terms.
+ * - each a[i] must be a Boolean term
+ * - this supports both CDCL(T) and MCSAT contexts
+ */
+extern smt_status_t check_context_with_term_assumptions(context_t *ctx, const param_t *parameters, uint32_t n, const term_t *a, int32_t *error);
 
 /*
  * Check satisfiability under model: check whether the assertions stored in ctx
@@ -348,6 +368,11 @@ extern void context_clear(context_t *ctx);
  */
 extern void context_clear_unsat(context_t *ctx);
 
+/*
+ * Invalidate cached UNSAT artifacts.
+ */
+extern void context_invalidate_unsat_core_cache(context_t *ctx);
+
 
 /*
  * Precheck: force generation of clauses and other stuff that's
@@ -383,6 +408,16 @@ extern smt_status_t precheck_context(context_t *ctx);
  * else.
  */
 extern smt_status_t check_with_delegate(context_t *ctx, const char *sat_solver, uint32_t verbosity);
+
+extern smt_status_t check_with_sat_delegate(context_t *ctx, const char *sat_solver,
+                                            sat_delegate_incremental_mode_t mode,
+                                            uint32_t verbosity, uint32_t n,
+                                            const literal_t *assumptions, ivector_t *failed);
+
+/*
+ * Pop notification for persistent SAT delegate state.
+ */
+extern void context_sat_delegate_state_pop(context_t *ctx, uint32_t level);
 
 
 /*

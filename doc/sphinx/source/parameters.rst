@@ -80,24 +80,19 @@ The CDCL SAT solver periodically deletes learned clauses that are judged useless
 The deletion procedure uses the following parameter.
 
 
-  +----------------+-------------+----------------------------------------------+
-  | Parameter	   | Type        |  Meaning                                     |
-  | Name           |             |                                              |
-  +================+=============+==============================================+
-  | r-threshold    | Integer     | Initial clause-reduction threshold           |
-  +----------------+-------------+----------------------------------------------+
-  | r-fraction     | Float       | Clause-reduction fraction                    |
-  |                |             | (must be between 0.0 and 1.0)                |
-  +----------------+-------------+----------------------------------------------+
-  | r-factor       | Float       | Increase factor for the reduction threshold  |
-  |                |             | (must be >= 1.0)                             |
-  +----------------+-------------+----------------------------------------------+
-  | clause-decay   | Float       | Clause activity decay                        |
-  |                |             | (must be between 0.0 and 1.0)                |
-  +----------------+-------------+----------------------------------------------+
+  +---------------------+-------------+-----------------------------------------+
+  | Parameter           | Type        |  Meaning                                |
+  | Name                |             |                                         |
+  +=====================+=============+=========================================+
+  | r-initial-threshold | Integer     | Initial clause-reduction threshold      |
+  +---------------------+-------------+-----------------------------------------+
+  | r-interval          | Integer     | Interval factor for the reduction bound |
+  +---------------------+-------------+-----------------------------------------+
+  | clause-decay        | Float       | Clause activity decay                   |
+  |                     |             | (must be between 0.0 and 1.0)           |
+  +---------------------+-------------+-----------------------------------------+
 
-To control clause deletion, Yices uses the same strategy as Minisat
-and other SAT solvers.
+To control clause deletion, Yices uses a strategy similar to CaDiCaL.
 
 - Each learned clause has an activity score that decays geometrically.
   After each conflict, the activity of all clauses not involved in
@@ -110,15 +105,15 @@ and other SAT solvers.
 
      .. code-block:: none
 
-	reduction-bound = max(r-threshold, r-fraction * number of clauses in initial problem)
+	reduction-bound = r-initial-threshold
 
   2) During the search, the bound determines when clauses are deleted:
 
      .. code-block:: none
 
-	when the number of learned clauses >= reduction bound
+	when the number of conflicts >= reduction bound
         delete low-activity clauses
-        reduction-bound  := r-factor * reduction-bound
+        reduction-bound  := number of conflicts + r-interval * sqrt(number of conflicts)
 
      The deletion removes approximately half of the learned clauses.
 
@@ -472,3 +467,38 @@ Flattening *(<=> p q)* rewrites the term to *(and (=> p q) (=> q p))*
 
 Flattening *(ite c p q)* rewrites the term to *(and (=> c p) (=> (not c) q)*
 
+
+
+SAT Delegate Selection (QF_BV)
+------------------------------
+
+For QF_BV contexts, the back-end SAT solver --- called a *delegate*
+--- can be selected on a per-check basis through the following
+parameter.
+
+  +------------+-----------------+---------------------------------------------+
+  | Parameter  | Value           |  Meaning                                    |
+  | Name       |                 |                                             |
+  +============+=================+=============================================+
+  | delegate   | none            | use the SAT back-end configured on the      |
+  |            |                 | context (default)                           |
+  |            +-----------------+---------------------------------------------+
+  |            | y2sat           | use y2sat for this check                    |
+  |            +-----------------+---------------------------------------------+
+  |            | cadical         | use CaDiCaL for this check                  |
+  |            +-----------------+---------------------------------------------+
+  |            | cryptominisat   | use CryptoMiniSat for this check            |
+  |            +-----------------+---------------------------------------------+
+  |            | kissat          | use Kissat for this check                   |
+  +------------+-----------------+---------------------------------------------+
+
+If a delegate is set in the parameter record and it differs from the
+delegate configured on the context (see
+:ref:`SAT delegate configuration <sat_delegate_config>`),
+the parameter takes effect for that single call only and the persistent
+delegate state of the context is left untouched. If the parameter is
+``"none"``, the context's configured delegate is used.
+
+A delegate name in this parameter has no effect for any logic other
+than QF_BV. Whether a particular delegate is available in the current
+Yices build can be checked with :c:func:`yices_has_delegate`.

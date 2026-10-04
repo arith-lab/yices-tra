@@ -28,9 +28,9 @@
 #include "mcsat/utils/lp_data.h"
 #include "mcsat/utils/lp_constraint_db.h"
 #include "mcsat/na/feasible_set_db.h"
+#include "mcsat/na/na_poly.h"
 
 #include "terms/term_manager.h"
-#include "mcsat/nta_info.h"
 
 struct na_plugin_s {
 
@@ -39,9 +39,6 @@ struct na_plugin_s {
 
   /** The plugin context */
   plugin_context_t* ctx;
-
-  /** Pointer to the global nta_info (from solver) */
-  nta_info_t* nta_info;
 
   /** The watch list manager */
   watch_list_manager_t wlm;
@@ -67,9 +64,6 @@ struct na_plugin_s {
   /** The value that got the assumptions variable in trouble */
   lp_value_t conflict_variable_value;
 
-  /** Refinement lemmas added during NTA conflict (for conflict explanation) */
-  ivector_t conflict_refinement_lemmas;
-
   /** Bound variable term */
   term_t global_bound_term;
 
@@ -78,6 +72,13 @@ struct na_plugin_s {
 
   /** Size of processed (for backtracking) */
   uint32_t processed_variables_size;
+
+  /** Variables of the registered constants. Their values are propagated at the base level when
+   *  they are registered, which a user pop undoes while the variables survive */
+  ivector_t constants;
+
+  /** True after a user pop, until the next propagation gives the constants their values again */
+  bool constants_unassigned;
 
   /** Scope holder for the int variables */
   scope_holder_t scope;
@@ -91,6 +92,8 @@ struct na_plugin_s {
     statistic_int_t* evaluations;
     statistic_int_t* constraint_regular;
     statistic_int_t* constraint_root;
+    statistic_avg_t* value_cache_usage;
+    statistic_avg_t* value_cache_feasibility;
   } stats;
 
   /** Database of polynomial constraints */
@@ -118,13 +121,23 @@ struct na_plugin_s {
   /** Exception handler */
   jmp_buf* exception;
 
-};
+  /** Map from an auxvar to the constraint variable of the equation that defines it
+   *  (na_plugin_add_auxvar_definition), for the decisions. The explanation uses another notion of
+   *  definition, taken from the trail at each conflict (na_collect_definitions). */
+  int_hmap_t auxvar_definitions;
 
-/**
- * Gets all the arithmetic variables from a non-atom t and adds their corresponding
- * mcsat variable to vars_out.
- */
-void na_plugin_get_term_variables(na_plugin_t* na, term_t t, int_mset_t* vars_out);
+  /** Substitute definitions in conflict explanations (na_plugin_explain_conflict); false if the
+   *  environment variable YICES_NA_NO_DEF_SUBST is set */
+  bool def_subst;
+
+  /** Decide an auxvar after the variables of its definition (na_plugin_decide); false if the
+   *  environment variable YICES_NA_NO_DEF_ORDER is set */
+  bool def_order;
+
+  /** Polynomial operations of the projection (owned) */
+  na_poly_backend_t* backend;
+
+};
 
 /**
  * Returns all arithmetic variables from a constraint (term) c and adds their corresponding

@@ -27,6 +27,7 @@
 #include "mcsat/utils/statistics.h"
 #include "mcsat/options.h"
 
+#include "preprocessor.h"
 #include "io/tracer.h"
 
 #include <setjmp.h>
@@ -42,7 +43,9 @@ typedef enum {
   /** Each time a conflict is encountered */
   MCSAT_SOLVER_CONFLICT,
   /** Each time we do a user pop, before garbage collection */
-  MCSAT_SOLVER_POP
+  MCSAT_SOLVER_POP,
+  /** Each time the parameter for delta increases */
+  MCSAT_DELTA_BUMP,
 } plugin_notify_kind_t;
 
 /**
@@ -74,10 +77,13 @@ struct plugin_context_s {
   /** The read-only solver trail */
   const mcsat_trail_t* trail;
 
+  /** The read-only preprocessor */
+  const preprocessor_t* preprocessor;
+
   /** Statistics */
   statistics_t* stats;
 
-  /** The tracer */
+  /** The tracer (also in the preprocessor) */
   tracer_t* tracer;
 
   /** Has the search been interrupted */
@@ -95,7 +101,20 @@ struct plugin_context_s {
   /** Request a restart */
   void (*request_restart) (plugin_context_t* self);
 
-  /** Request garbage collection */
+  /**
+   * Report that the plugin could not perform a computation; the report is also a restart
+   * request. Above the base level, the solver restarts and discards the conflict, if any, of
+   * the propagation or get_conflict call that made the report. At the base level, or if the
+   * report is pending when the search starts, the solver answers unknown; only a conflict that
+   * propagation left in the trail is still analyzed, since a base-level conflict is real.
+   */
+  void (*report_failure) (plugin_context_t* self);
+
+  /**
+   * Request garbage collection. The GC runs at base level, right after the
+   * next full restart (a pending GC forces the next restart to be full,
+   * even when partial restarts are enabled).
+   */
   void (*request_gc) (plugin_context_t* self);
 
   /** Request decision calls for a specific type */
@@ -118,6 +137,20 @@ struct plugin_context_s {
 
   /** Add model value hint in the value cache */
   void (*hint_value) (plugin_context_t* self, variable_t x, const mcsat_value_t* val);
+
+  /** If a plugin triggers delta at a certain decision level, it must call the following function*/
+  void (*trigger_delta) (plugin_context_t* self, uint32_t level);
+  /** Register a generated term and notify its owners */
+  void (*register_term) (plugin_context_t* self, term_t t);
+
+  /** True if type tau is in the frozen equality-sensitive closure. */
+  bool (*type_is_equality_sensitive) (plugin_context_t* self, type_t tau);
+
+  /** Current equality-sensitivity generation. */
+  uint32_t (*equality_sensitivity_generation) (plugin_context_t* self);
+
+  /** True after equality sensitivity has been frozen for this search call. */
+  bool (*equality_sensitivity_is_frozen) (plugin_context_t* self);
 
 };
 
@@ -205,6 +238,14 @@ struct plugin_s {
   void (*new_term_notify) (plugin_t* plugin, term_t term, trail_token_t* prop);
 
   /**
+   * Notification of an input assertion (each conjunct separately), at the base level and
+   * before it is asserted. The assertion is preprocessed, except the equalities x = t that the
+   * solver asserts for assumptions on solved variables. Lemmas and the equalities added by
+   * purification are not input assertions. Optional.
+   */
+  void (*new_assertion_notify) (plugin_t* plugin, term_t assertion);
+
+  /**
    * Notification of new lemmas. Each lemma is a disjunction given as a vector
    * of terms.
    */
@@ -272,7 +313,7 @@ struct plugin_s {
    * Explain an evaluation. Return true if the constraint indeed evaluates to the
    * given value. The output variables should be mcsat variables (variable_t).
    */
-  bool (*explain_evaluation) (plugin_t* plugin, term_t t, int_mset_t* vars, mcsat_value_t* value);
+  bool (*explain_evaluation) (plugin_t* plugin, term_t t, int_mset_t* vars, const mcsat_value_t* value);
 
   /**
    * Simplify internal conflict literal (e.g., ROOT_CONSTRAINT) in terms of conjunction of
@@ -320,6 +361,13 @@ struct plugin_s {
    */
   void (*set_exception_handler)(plugin_t* plugin, jmp_buf* handler);
 
+  /**
+   * Optional: notifies the plugin about a new tracer. 
+   * By default, the plugins can access this tracer within 
+   * the plugin_context_t passed at construction time.
+   */
+  void (*set_tracer)(plugin_t* plugin, tracer_t* tracer);
+
 };
 
 /** Construct the plugin */
@@ -328,6 +376,7 @@ void plugin_construct(plugin_t* plugin) {
   plugin->construct                 = NULL;
   plugin->destruct                  = NULL;
   plugin->new_term_notify           = NULL;
+  plugin->new_assertion_notify      = NULL;
   plugin->new_lemma_notify          = NULL;
   plugin->propagate                 = NULL;
   plugin->decide                    = NULL;
@@ -343,6 +392,7 @@ void plugin_construct(plugin_t* plugin) {
   plugin->gc_mark_and_clear         = NULL;
   plugin->gc_sweep                  = NULL;
   plugin->set_exception_handler     = NULL;
+  plugin->set_tracer                = NULL;
 }
 
 #endif /* PLUGIN_H_ */

@@ -1,0 +1,8 @@
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(declare-fun y () Real)
+(assert (or (> (sin x) 2) (> (sin y) 2)))           
+(assert (or (not (> (sin x) 0)) (> (sin y) 0)))     
+(assert (or (> (sin x) 0) (not (> (sin y) 0))))     
+(assert (or (not (> (sin x) 0)) (not (> (sin y) 0)))) 
+(check-sat)

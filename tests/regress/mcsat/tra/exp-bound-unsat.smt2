@@ -1,0 +1,5 @@
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(assert (> (exp x) 500))
+(assert (< x 3)) 
+(check-sat)

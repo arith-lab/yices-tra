@@ -1,5 +1,8 @@
 This Software uses the GMP library, available from http:://gmplib.org/.
-The following terms apply to GMP.
+It also uses the FLINT library, which includes Arb, available from https://flintlib.org/,
+and the MPFR library, available from https://www.mpfr.org/. Both are distributed under
+version 3 or (at your option) any later version of the GNU Lesser General Public License.
+The following terms apply to GMP, FLINT and MPFR.
 ----
                    GNU LESSER GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007

@@ -439,6 +439,7 @@ static void activate_arith_fragment(arith_fragment_t code) {
     break;
 
   case ARITH_FFA: /* not defined in smt1 */
+  case ARITH_TRA: /* not defined in smt1 */
   case ARITH_NONE:
     break;
   }

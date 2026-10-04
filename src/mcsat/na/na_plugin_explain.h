@@ -34,6 +34,10 @@ typedef struct na_plugin_s na_plugin_t;
  * pos: set of positive assumptions (to extend the trail)
  * neg: set of negative assumptions (to extend the trail)
  *
+ * Ensures: conflict is a set of literals that are true on the trail (or assumed in pos or neg) and
+ *          whose conjunction is unsatisfiable. Besides the core and the cell, it may contain
+ *          equations true on the trail that are not in the core (none if the environment variable
+ *          YICES_NA_NO_DEF_SUBST is set).
  * */
 void na_plugin_explain_conflict(na_plugin_t* na, const int_mset_t* pos, const int_mset_t* neg, variable_t conflict_var,
     const ivector_t* core, const ivector_t* lemma_reasons, ivector_t* conflict);

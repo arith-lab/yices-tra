@@ -155,6 +155,8 @@ static const char * const code2error[NUM_INTERNALIZATION_ERRORS] = {
   "arithmetic solver exception",
   "bitvector solver exception",
   "theory not supported by MCSAT",
+  "high-order functions not supported",
+  "theory not supported by the context",
 };
 
 
@@ -758,8 +760,8 @@ static void print_results(void) {
 
   resu = context.core->status;
   if (resu == YICES_STATUS_SAT) {
-    if (context_has_mcsat(&context) && mcsat_delta_used_in_trail(context.mcsat)) {
-      printf("sat (delta mode used with delta %"PRId32")\n", mcsat_get_nta_delta(context.mcsat));
+    if (context_has_mcsat(&context) && mcsat_delta_used(context.mcsat)) {
+      printf("sat (delta mode used with delta %"PRId32")\n", mcsat_get_delta(context.mcsat));
     } else {
       printf("sat\n");
     }
@@ -784,8 +786,8 @@ static void print_results(void) {
   resu = context.core->status;
 
   if (resu == YICES_STATUS_SAT) {
-    if (context_has_mcsat(&context) && mcsat_delta_used_in_trail(context.mcsat)) {
-      printf("sat (delta mode used with delta %"PRId32")\n", mcsat_get_nta_delta(context.mcsat));
+    if (context_has_mcsat(&context) && mcsat_delta_used(context.mcsat)) {
+      printf("sat (delta mode used with delta %"PRId32")\n", mcsat_get_delta(context.mcsat));
     } else {
       printf("sat\n");
     }

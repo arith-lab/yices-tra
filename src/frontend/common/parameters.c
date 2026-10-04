@@ -44,7 +44,6 @@ static const char * const param_names[NUM_PARAMETERS] = {
   "clause-decay",
   "d-factor",
   "d-threshold",
-  "div-neq0",
   "dyn-ack",
   "dyn-ack-threshold",
   "dyn-bool-ack",
@@ -83,24 +82,23 @@ static const char * const param_names[NUM_PARAMETERS] = {
   "max-extensionality",
   "max-interface-eqs",
   "max-update-conflicts",
-  "mcsat-bool-freq",
   "mcsat-bv-var-size",
+  "mcsat-delta",
+  "mcsat-l2o",
   "mcsat-na-bound",
   "mcsat-na-bound-max",
   "mcsat-na-bound-min",
   "mcsat-na-mgcd",
   "mcsat-na-nlsat",
-  "mcsat-no-sin-period",
-  "mcsat-nta-delta",
   "mcsat-partial-restart",
   "mcsat-rand-dec-freq",
   "mcsat-rand-dec-seed",
+  "mcsat-supplement-check",
   "mcsat-var-order",
   "optimistic-fcheck",
   "prop-threshold",
-  "r-factor",
-  "r-fraction",
-  "r-threshold",
+  "r-initial-threshold",
+  "r-interval",
   "random-seed",
   "randomness",
   "simplex-adjust",
@@ -124,7 +122,6 @@ static const yices_param_t param_code[NUM_PARAMETERS] = {
   PARAM_CLAUSE_DECAY,
   PARAM_D_FACTOR,
   PARAM_D_THRESHOLD,
-  PARAM_MCSAT_DIV_NEQ0,
   PARAM_DYN_ACK,
   PARAM_DYN_ACK_THRESHOLD,
   PARAM_DYN_BOOL_ACK,
@@ -163,24 +160,23 @@ static const yices_param_t param_code[NUM_PARAMETERS] = {
   PARAM_MAX_EXTENSIONALITY,
   PARAM_MAX_INTERFACE_EQS,
   PARAM_MAX_UPDATE_CONFLICTS,
-  PARAM_MCSAT_BOOL_FREQ,
   PARAM_MCSAT_BV_VAR_SIZE,
+  PARAM_MCSAT_VAL_DELTA_MODE,
+  PARAM_MCSAT_L2O,
   PARAM_MCSAT_NA_BOUND,
   PARAM_MCSAT_NA_BOUND_MAX,
   PARAM_MCSAT_NA_BOUND_MIN,
   PARAM_MCSAT_NA_MGCD,
   PARAM_MCSAT_NA_NLSAT,
-  PARAM_MCSAT_NO_SIN_PERIOD,
-  PARAM_MCSAT_NTA_DELTA,
   PARAM_MCSAT_PARTIAL_RESTART,
   PARAM_MCSAT_RAND_DEC_FREQ,
   PARAM_MCSAT_RAND_DEC_SEED,
+  PARAM_MCSAT_SUPPLEMENT_CHECK,
   PARAM_MCSAT_VAR_ORDER,
   PARAM_OPTIMISTIC_FCHECK,
   PARAM_PROP_THRESHOLD,
-  PARAM_R_FACTOR,
-  PARAM_R_FRACTION,
-  PARAM_R_THRESHOLD,
+  PARAM_R_INITIAL_THRESHOLD,
+  PARAM_R_INTERVAL,
   PARAM_RANDOM_SEED,
   PARAM_RANDOMNESS,
   PARAM_SIMPLEX_ADJUST,
@@ -213,6 +209,21 @@ static const branch_t branching_code[NUM_BRANCHING_MODES] = {
   BRANCHING_TH_NEG,
   BRANCHING_TH_POS,
   BRANCHING_THEORY,
+};
+
+/*
+ * Supplementary MCSAT check modes
+ */
+#define NUM_MCSAT_SUPPLEMENT_CHECK_MODES 2
+
+static const char * const mcsat_supplement_check_modes[NUM_MCSAT_SUPPLEMENT_CHECK_MODES] = {
+  "both",
+  "final-only",
+};
+
+static const mcsat_supplement_check_t mcsat_supplement_check_code[NUM_MCSAT_SUPPLEMENT_CHECK_MODES] = {
+  MCSAT_SUPPLEMENT_CHECK_BOTH,
+  MCSAT_SUPPLEMENT_CHECK_FINAL_ONLY,
 };
 
 
@@ -458,6 +469,28 @@ bool param_val_to_branching(const char *name, const param_val_t *v, branch_t *va
     }
   }
   *reason = "must be one of 'default' 'positive' 'negative' 'theory' 'th-neg' 'th-pos";
+
+  return false;
+}
+
+/*
+ * Supplementary MCSAT check mode
+ * - allowed modes are "both" and "final-only"
+ */
+bool param_val_to_mcsat_supplement_check(const char *name, const param_val_t *v,
+                                         mcsat_supplement_check_t *value, char **reason) {
+  int32_t i;
+
+  if (v->tag == PARAM_VAL_SYMBOL) {
+    i = binary_search_string(v->val.symbol, mcsat_supplement_check_modes,
+                             NUM_MCSAT_SUPPLEMENT_CHECK_MODES);
+    if (i >= 0) {
+      assert(i < NUM_MCSAT_SUPPLEMENT_CHECK_MODES);
+      *value = mcsat_supplement_check_code[i];
+      return true;
+    }
+  }
+  *reason = "must be one of 'both' 'final-only'";
 
   return false;
 }

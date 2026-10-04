@@ -51,6 +51,7 @@
 #include "frontend/smt2/smt2_printer.h"
 #include "io/term_printer.h"
 #include "frontend/smt2/smt2_symbol_printer.h"
+#include "frontend/ytra_version.h"
 #include "mcsat/options.h"
 #include "mcsat/solver.h"
 #include "model/model_eval.h"
@@ -78,6 +79,8 @@
 #include "mt/threads.h"
 #include "mt/thread_macros.h"
 
+//To declare the symbols that the MCSAT plugins interpret
+#include "mcsat/mcsat_symbols.h"
 
 /*
  * DUMP CONTEXT: FOR TESTING/DEBUGGING
@@ -374,9 +377,15 @@ static void smt2_push_name(smt2_name_stack_t *s, char *name) {
 /*
  * Remove names on top of the stack and remove them from the term_name table
  * - ptr = new top: names[0 ... ptr-1] are kept
+ *
+ * Also drop any array-constant markers in __smt2_globals.array_const_terms
+ * for the popped term ids. Most popped names are not arrays, so we look up
+ * the marker first and only erase if present.
  */
 static void smt2_pop_term_names(smt2_name_stack_t *s, uint32_t ptr) {
   char *name;
+  term_t t;
+  int_hmap_pair_t *p;
   uint32_t n;
 
   n = s->top;
@@ -384,7 +393,13 @@ static void smt2_pop_term_names(smt2_name_stack_t *s, uint32_t ptr) {
     n --;
     name = s->names[n];
 
-    assert(yices_get_term_by_name(name) != NULL_TERM);
+    t = yices_get_term_by_name(name);
+    assert(t != NULL_TERM);
+    p = int_hmap_find(&__smt2_globals.array_const_terms, t);
+    if (p != NULL) {
+      int_hmap_erase(&__smt2_globals.array_const_terms, p);
+    }
+
     yices_remove_term_name(name);
     assert(yices_get_term_by_name(name) == NULL_TERM);
 
@@ -637,6 +652,8 @@ static smt_status_t check_with_model(context_t *ctx, const param_t *params, uint
   model_t mdl;
   evaluator_t mdl_evaluator;
 
+  assert(ctx->mcsat != NULL);
+
   // Init model and evaluation
   init_model(&mdl, ctx->terms, true);
   init_evaluator(&mdl_evaluator, &mdl);
@@ -665,10 +682,14 @@ static smt_status_t check_with_model(context_t *ctx, const param_t *params, uint
  * Check sat with assumptions and build an unsat core
  */
 static smt_status_t check_with_assumptions(context_t *ctx, const param_t *params, uint32_t n, const term_t a[], ivector_t *core) {
-  ivector_t assumptions;
   smt_status_t status;
-  literal_t l;
-  uint32_t i;
+  int32_t error;
+
+  if (ctx->mcsat != NULL && !context_supports_model_interpolation(ctx)) {
+    // check-sat-assuming should work in MCSAT even if interpolation wasn't
+    // enabled up-front.
+    ctx->mcsat_options.model_interpolation = true;
+  }
 
   // if ctx is already unsat, the core is empty
   if (context_status(ctx) == YICES_STATUS_UNSAT) {
@@ -676,47 +697,15 @@ static smt_status_t check_with_assumptions(context_t *ctx, const param_t *params
     return YICES_STATUS_UNSAT;
   }
 
-  // If MCSAT use the model solving command
-  if (ctx->mcsat) {
-    // Copy over to model
-    model_t mdl;
-    init_model(&mdl, ctx->terms, true);
-    init_ivector(&assumptions, n);
-    for (i = 0; i < n; ++ i) {
-      term_t x = unsigned_term(a[i]);
-      value_t val = is_pos_term(a[i]) ? vtbl_mk_bool(&mdl.vtbl, true) : vtbl_mk_bool(&mdl.vtbl, false);
-      model_map_term(&mdl, x, val);
-      ivector_push(&assumptions, x);
-    }
-    // Solve
-    status = yices_check_context_with_model(ctx, params, &mdl, n, assumptions.data);
-    // Remove temps
-    delete_ivector(&assumptions);
-    delete_model(&mdl);
-
-    return status;
+  status = check_context_with_term_assumptions(ctx, params, n, a, &error);
+  if (status == YICES_STATUS_ERROR && error < 0) {
+    yices_internalization_error(error);
+  } else if (status == YICES_STATUS_ERROR && error > 0) {
+    yices_error_report()->code = error;
   }
-
-  // convert a[0] ... a[n-1] to assumptions
-  init_ivector(&assumptions, n);
-  for (i=0; i<n; i++) {
-    l = context_add_assumption(ctx, a[i]);
-    if (l < 0) {
-      // error when processing term a[i]
-      yices_internalization_error(l);
-      status = YICES_STATUS_ERROR;
-      goto done;
-    }
-    ivector_push(&assumptions, l);
-  }
-
-  status = check_context_with_assumptions(ctx, params, n, assumptions.data);
   if (status == YICES_STATUS_UNSAT) {
     context_build_unsat_core(ctx, core);
   }
-
- done:
-  delete_ivector(&assumptions);
 
   return status;
 }
@@ -747,9 +736,10 @@ static void init_cmd_stats(smt2_cmd_stats_t *stats) {
 /*
  * REQUIRED INFO
  */
-static const char *yices_name = "Yices";
-static const char *yices_authors = "Bruno Dutertre, Dejan Jovanović, Ian A. Mason, Stéphane Graham-Lengrand";
-static const char *error_behavior = "immediate-exit";
+static const char *yices_name = YTRA_NAME;
+static const char *yices_authors = "Jorge Gallego-Hernández, Enrico Lipparini, Alessio Mansutti (YicesTRA); "
+                                   "Bruno Dutertre, Dejan Jovanović, Ian A. Mason, Stéphane Graham-Lengrand (Yices 2)";
+static const char *error_behavior = "continued-execution";
 
 /*
  * GLOBAL OBJECTS
@@ -1131,6 +1121,10 @@ static void print_yices_error(bool full) {
 
   case MCSAT_ERROR_ASSUMPTION_TERM_NOT_SUPPORTED:
     print_out("mcsat: checking with assumptions only supports variables as assumptions");
+    break;
+
+  case MCSAT_ERROR_ASSUMPTION_TYPE_NOT_SUPPORTED:
+    print_out("mcsat: assumption variable has a type that mcsat cannot decide on");
     break;
 
   case OUTPUT_ERROR:
@@ -1554,11 +1548,12 @@ static void __attribute__((noreturn)) bad_status_bug(FILE *f) {
 static void show_status(smt_status_t status) {
   if (status == YICES_STATUS_SAT) {
     context_t* ctx = __smt2_globals.ctx;
-    if (ctx != NULL && context_has_mcsat(ctx) && mcsat_delta_used_in_trail(ctx->mcsat)) {
-      print_out("sat (delta mode used with delta %"PRId32")\n", mcsat_get_nta_delta(ctx->mcsat));
+    if (ctx != NULL && context_has_mcsat(ctx) && mcsat_delta_used(ctx->mcsat)) {
+      assert(mcsat_is_delta_mode_enabled(ctx->mcsat));
+      print_out("delta-sat (with delta %"PRId32")\n", mcsat_get_delta(ctx->mcsat));
       flush_out();
       return;
-    }
+    } 
   }
   print_out("%s\n", status2string[status]);
   flush_out();
@@ -2289,6 +2284,27 @@ static void set_verbosity(smt2_globals_t *g, const char *name, aval_t value) {
   q_clear(&aux);
 }
 
+/*
+ * Effective architecture for SMT2 logic:
+ * - defaults to arch_for_logic(logic)
+ * - if force_dpllt is enabled, replace MCSAT architecture with CDCL(T).
+ */
+static inline context_arch_t smt2_arch_for_logic(const smt2_globals_t *g, smt_logic_t logic) {
+  context_arch_t arch;
+
+  assert(logic != SMT_UNKNOWN);
+  arch = (context_arch_t) arch_for_logic(logic);
+  if (g->force_dpllt && arch == CTX_ARCH_MCSAT) {
+    arch = CTX_ARCH_EGFUNSPLXBV;
+  }
+
+  return arch;
+}
+
+static inline bool smt2_logic_uses_mcsat_supplement(const smt2_globals_t *g, smt_logic_t logic) {
+  return g->force_dpllt && arch_for_logic(logic) == CTX_ARCH_MCSAT;
+}
+
 
 /*
  * Options: produce-unsat-cores and produce-unsat-assumptions.
@@ -2303,6 +2319,10 @@ static void set_unsat_core_option(smt2_globals_t *g, const char *name, aval_t va
       print_error("can't have both :produce-unsat-cores and :produce-unsat-assumptions true");
     } else {
       g->produce_unsat_cores = flag;
+      // Set model_interpolation if context is MCSAT or will use MCSAT architecture
+      if (g->mcsat || (g->logic_code != SMT_UNKNOWN && smt2_arch_for_logic(g, g->logic_code) == CTX_ARCH_MCSAT)) {
+        g->mcsat_options.model_interpolation = true;
+      }
       report_success();
     }
   } else {
@@ -2318,6 +2338,10 @@ static void set_unsat_assumption_option(smt2_globals_t *g, const char *name, ava
       print_error("can't have both :produce-unsat-cores and :produce-unsat-assumptions true");
     } else {
       g->produce_unsat_assumptions = flag;
+      // Set model_interpolation if context is MCSAT or will use MCSAT architecture
+      if (g->mcsat || (g->logic_code != SMT_UNKNOWN && smt2_arch_for_logic(g, g->logic_code) == CTX_ARCH_MCSAT)) {
+        g->mcsat_options.model_interpolation = true;
+      }
       report_success();
     }
   } else {
@@ -2600,6 +2624,7 @@ static void init_smt2_context(smt2_globals_t *g) {
   smt_logic_t logic;
   context_arch_t arch;
   context_mode_t mode;
+  int32_t code;
   bool iflag;
   bool qflag;
 
@@ -2612,7 +2637,7 @@ static void init_smt2_context(smt2_globals_t *g) {
   if (g->timeout > 0) {
     mode = CTX_MODE_INTERACTIVE;
   }
-  arch = arch_for_logic(logic);
+  arch = smt2_arch_for_logic(g, logic);
   iflag = iflag_for_logic(logic);
   qflag = qflag_for_logic(logic);
 
@@ -2643,16 +2668,21 @@ static void init_smt2_context(smt2_globals_t *g) {
 
   g->ctx = yices_create_context(logic, arch, mode, iflag, qflag);
   assert(g->ctx != NULL);
-  if (g->verbosity > 0 || g->tracer != NULL) {
-    context_set_trace(g->ctx, get_tracer(g));
-  }
 
   // Set the mcsat options
   g->ctx->mcsat_options = g->mcsat_options;
   ivector_copy(&g->ctx->mcsat_var_order, g->var_order.data, g->var_order.size);
 
-  if (g->ctx->mcsat != NULL) {
-    mcsat_set_use_period_for_sin(g->ctx->mcsat, !g->ctx->mcsat_options.no_sin_period);
+  if (!g->mcsat && smt2_logic_uses_mcsat_supplement(g, logic)) {
+    code = context_attach_mcsat_supplement(g->ctx);
+    if (code < 0) {
+      print_error("failed to attach the mcsat supplement");
+      done = true;
+      return;
+    }
+  }
+  if (g->verbosity > 0 || g->tracer != NULL) {
+    context_set_trace(g->ctx, get_tracer(g));
   }
 
   /*
@@ -2670,8 +2700,20 @@ static void init_smt2_context(smt2_globals_t *g) {
  *   this must be called after the assertions
  */
 static void init_search_parameters(smt2_globals_t *g) {
+  int32_t code;
+
   assert(g->ctx != NULL);
   yices_default_params_for_context(g->ctx, &g->parameters);
+  if (g->delegate != NULL) {
+    if (parse_sat_delegate(g->delegate, &g->ctx->sat_delegate) < 0) {
+      g->ctx->sat_delegate = SAT_DELEGATE_NONE;
+    }
+    code = params_set_field(&g->parameters, "delegate", g->delegate);
+    assert(code == 0);
+    if (code < 0) {
+      g->parameters.delegate = SAT_DELEGATE_NONE;
+    }
+  }
 }
 
 
@@ -2751,6 +2793,48 @@ static smt_status_t check_sat_with_timeout(smt2_globals_t *g, const param_t *par
  */
 static smt_status_t check_sat_with_assumptions(smt2_globals_t *g, const param_t *params, assumptions_and_core_t *a) {
   smt_status_t stat;
+  ivector_t vars, values;
+  uint32_t i, j;
+  bool literals_only;
+
+  /*
+   * In MCSAT, a literal-only check-sat-assuming can be handled directly as
+   * check-with-model. This preserves SAT models for subsequent get-model.
+   *
+   * We keep the term-assumption path for non-literals (e.g., named formulas)
+   * and when unsat assumptions are requested (core extraction needed).
+   */
+  if (g->ctx->mcsat != NULL && !g->produce_unsat_assumptions) {
+    init_ivector(&vars, a->assumptions.size);
+    init_ivector(&values, a->assumptions.size);
+    literals_only = true;
+    for (i = 0; i < a->assumptions.size; ++i) {
+      term_t lit = a->assumptions.data[i];
+      term_t atom = unsigned_term(lit);
+      term_kind_t k = term_kind(__yices_globals.terms, atom);
+      if (k != UNINTERPRETED_TERM && k != VARIABLE) {
+        literals_only = false;
+        break;
+      }
+      // An atom given twice, as in (a (not a)), may need two model values: use the general path
+      for (j = 0; j < vars.size && vars.data[j] != atom; ++j) {}
+      if (j < vars.size) {
+        literals_only = false;
+        break;
+      }
+      ivector_push(&vars, atom);
+      ivector_push(&values, is_pos_term(lit) ? true_term : false_term);
+    }
+    if (literals_only) {
+      stat = check_with_model(g->ctx, params, vars.size, vars.data, values.data);
+      a->status = stat;
+      delete_ivector(&values);
+      delete_ivector(&vars);
+      return stat;
+    }
+    delete_ivector(&values);
+    delete_ivector(&vars);
+  }
 
   if (g->timeout == 0) {
     // no timeout
@@ -3075,6 +3159,7 @@ static void add_delayed_assertion(smt2_globals_t *g, term_t t) {
 static void check_delayed_assertions(smt2_globals_t *g, bool report) {
   int32_t code;
   smt_status_t status;
+  sat_delegate_incremental_mode_t delegate_mode;
   model_t *model;
 
   // set frozen to true to disallow more assertions
@@ -3130,7 +3215,20 @@ static void check_delayed_assertions(smt2_globals_t *g, bool report) {
          * Special case: QF_BV with delegate
          */
         if (g->dimacs_file == NULL) {
-          status = check_with_delegate(g->ctx, g->delegate, g->verbosity);
+          init_search_parameters(g);
+          if (!effective_sat_delegate_incremental_mode(g->ctx->sat_delegate,
+                                                       g->ctx->sat_delegate_incremental_mode,
+                                                       g->ctx->sat_delegate_incremental_mode_set,
+                                                       g->ctx->mode == CTX_MODE_ONECHECK,
+                                                       false, &delegate_mode)) {
+            print_error("unsupported SAT delegate incremental mode %s for delegate %s",
+                        sat_delegate_incremental_mode_name(g->ctx->sat_delegate_incremental_mode),
+                        g->delegate);
+            done = true;
+            return;
+          }
+          status = check_with_sat_delegate(g->ctx, g->delegate,
+                                           delegate_mode, g->verbosity, 0, NULL, NULL);
         } else {
           code = process_then_export_to_dimacs(g->ctx, g->dimacs_file, &status);
           if (code < 0) {
@@ -3203,7 +3301,7 @@ static void validate_unsat_core(smt2_globals_t *g) {
   int32_t code;
   smt_status_t status;
 
-  if (g->unsat_core->status == STATUS_UNSAT) {
+  if (g->unsat_core->status == YICES_STATUS_UNSAT) {
     saved_context = g->ctx;
     g->ctx = NULL;
     init_smt2_context(g);
@@ -3219,7 +3317,7 @@ static void validate_unsat_core(smt2_globals_t *g) {
       fflush(stdout);
     } else {
       status = check_context(g->ctx, &g->parameters);
-      if (status != STATUS_UNSAT) {
+      if (status != YICES_STATUS_UNSAT) {
         printf("**** BUG: INVALID UNSAT CORE ****\n");
         fflush(stdout);
       }
@@ -3296,7 +3394,7 @@ static void check_delayed_assertions_assuming(smt2_globals_t *g, uint32_t n, sig
       if (code < 0) {
         // error during assertion processing
         print_yices_error(true);
-	done = true;
+        done = true;
         return;
       }
       init_search_parameters(g);
@@ -3310,7 +3408,7 @@ static void check_delayed_assertions_assuming(smt2_globals_t *g, uint32_t n, sig
         // cleanup
         free_assumptions(assumptions);
         g->unsat_assumptions = NULL;
-	done = true;
+        done = true;
       }
     }
   }
@@ -3839,12 +3937,55 @@ static model_t *get_ef_model(smt2_globals_t *g) {
  * - i = index of the SMT2 expression for t in token_queue
  */
 static void print_term_value(smt2_pp_t *printer, value_table_t *vtbl, etk_queue_t *token_queue, value_t v, type_t tau, int32_t i) {
+  etoken_t *tk;
+  type_t value_type;
+
+  value_type = tau;
+
+  /*
+   * Keep decimal syntax stable for get-value on decimal literals:
+   * if the query is 0.0 (or (- 0.0)) and the model value is an integer,
+   * print 0.0 rather than 0.
+   */
+  if (good_token(token_queue, i) && start_token(token_queue, i)) {
+    tk = get_etoken(token_queue, i);
+    if (atomic_token(token_queue, i)) {
+      if (tk->key == SMT2_TK_DECIMAL) {
+        value_type = real_id;
+      }
+    } else if (open_token(token_queue, i)) {
+      int32_t j, k;
+
+      /*
+       * Match the shape (- <decimal>) with a single argument.
+       */
+      j = i + 1;
+      if (good_token(token_queue, j) && atomic_token(token_queue, j)) {
+        tk = get_etoken(token_queue, j);
+        if (tk->key == SMT2_TK_SYMBOL && strcmp(tk->ptr, "-") == 0) {
+          j = token_sibling(token_queue, j);
+          if (good_token(token_queue, j) && atomic_token(token_queue, j)) {
+            tk = get_etoken(token_queue, j);
+            if (tk->key == SMT2_TK_DECIMAL) {
+              k = token_sibling(token_queue, j);
+              if (good_token(token_queue, k) &&
+                  close_token(token_queue, k) &&
+                  token_sibling(token_queue, i) == k + 1) {
+                value_type = real_id;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   pp_open_block(&printer->pp, PP_OPEN_PAR);
   pp_smt2_expr(&printer->pp, token_queue, i);
   if (__smt2_globals.clean_model_format) {
     smt2_pp_object(printer, vtbl, v);
   } else {
-    smt2_pp_smt2_object(printer, vtbl, v, tau);
+    smt2_pp_smt2_object(printer, vtbl, v, value_type);
   }
   pp_close_block(&printer->pp, true);
 }
@@ -4004,7 +4145,9 @@ static void print_smt2_model(smt2_pp_t *printer, smt2_model_t *sm) {
      */
     if (good_object(vtbl, v)) {
       tau = term_type(terms, t);
-      smt2_pp_def(printer, vtbl, sm->names.data[i], tau, v);
+      bool array_const =
+        int_hmap_find(&__smt2_globals.array_const_terms, t) != NULL;
+      smt2_pp_def(printer, vtbl, sm->names.data[i], tau, v, array_const);
     }
   }
   pp_close_block(&printer->pp, true);
@@ -4601,6 +4744,7 @@ static void init_smt2_globals(smt2_globals_t *g) {
   g->pushes_after_unsat = 0;
   g->logic_name = NULL;
   g->mcsat = false;
+  g->force_dpllt = false;
   init_ivector(&g->var_order, 0);
   init_mcsat_options(&g->mcsat_options);
   g->efmode = false;
@@ -4647,6 +4791,7 @@ static void init_smt2_globals(smt2_globals_t *g) {
   init_named_term_stack(&g->named_asserts);
 
   init_pvector(&g->model_term_names, 0);
+  init_int_hmap(&g->array_const_terms, 0);
 
   g->unsat_core = NULL;
   g->unsat_assumptions = NULL;
@@ -4715,6 +4860,7 @@ static void delete_smt2_globals(smt2_globals_t *g) {
   delete_named_term_stack(&g->named_asserts);
 
   delete_string_vector(&g->model_term_names);
+  delete_int_hmap(&g->array_const_terms);
 
   if (g->unsat_core != NULL) {
     free_assumptions(g->unsat_core);
@@ -4998,7 +5144,8 @@ void smt2_get_unsat_assumptions(void) {
 
 /* Check whether MCSAT solver is going to be used. */
 static bool mcsat_enabled(smt2_globals_t *g) {
-  return g->mcsat || arch_for_logic(g->logic_code) == CTX_ARCH_MCSAT;
+  return !g->force_dpllt &&
+         (g->mcsat || (g->logic_code != SMT_UNKNOWN && arch_for_logic(g->logic_code) == CTX_ARCH_MCSAT));
 }
 
 /*
@@ -5041,6 +5188,14 @@ void smt2_get_value(term_t *a, uint32_t n) {
   tprint_calls("get-value", __smt2_globals.stats.num_get_value);
 
   if (check_logic()) {
+    // The model gives the symbols that MCSAT plugins interpret (pi, sin, exp) approximate
+    // values, so get-value could print approximations as values: it is unsupported.
+    // TODO (YicesTRA): return an abstract interval for each term instead.
+    if (mcsat_num_interpreted_symbols(__smt2_globals.logic_code) > 0) {
+      print_out("unsupported\n");
+      return;
+    }
+
     if (__smt2_globals.efmode) {
       mdl = get_ef_model(&__smt2_globals);
     } else {
@@ -5117,9 +5272,6 @@ static bool is_yices_option(const char *name, const char **option) {
  * If not supported it simply returns false.
  */
 static bool yices_get_option(smt2_globals_t *g, yices_param_t p) {
-  bool supported;
-
-  supported = true;
 
   switch (p) {
   case PARAM_VAR_ELIM:
@@ -5167,16 +5319,12 @@ static bool yices_get_option(smt2_globals_t *g, yices_param_t p) {
     print_float_value(g->parameters.c_factor);
     break;
 
-  case PARAM_R_THRESHOLD:
-    print_uint32_value(g->parameters.r_threshold);
+  case PARAM_R_INITIAL_THRESHOLD:
+    print_uint32_value(g->parameters.r_initial_threshold);
     break;
 
-  case PARAM_R_FRACTION:
-    print_float_value(g->parameters.r_fraction);
-    break;
-
-  case PARAM_R_FACTOR:
-    print_float_value(g->parameters.r_factor);
+  case PARAM_R_INTERVAL:
+    print_uint32_value(g->parameters.r_interval);
     break;
 
   case PARAM_VAR_DECAY:
@@ -5371,6 +5519,14 @@ static bool yices_get_option(smt2_globals_t *g, yices_param_t p) {
     print_string_value(ematchmode2string[g->ef_client.ef_parameters.ematch_term_mode]);
     break;
 
+  case PARAM_MCSAT_BV_VAR_SIZE:
+    print_int32_value(g->mcsat_options.bv_var_size);
+    break;
+
+  case PARAM_MCSAT_L2O:
+    print_boolean_value(g->mcsat_options.l2o);
+    break;
+
   case PARAM_MCSAT_NA_BOUND:
     print_boolean_value(g->mcsat_options.na_bound);
     break;
@@ -5391,16 +5547,12 @@ static bool yices_get_option(smt2_globals_t *g, yices_param_t p) {
     print_boolean_value(g->mcsat_options.na_nlsat);
     break;
 
-  case PARAM_MCSAT_NO_SIN_PERIOD:
-    print_boolean_value(g->mcsat_options.no_sin_period);
+  case PARAM_MCSAT_VAL_DELTA_MODE:
+    print_int32_value(g->mcsat_options.delta_precision);
     break;
 
-  case PARAM_MCSAT_NTA_DELTA:
-    print_int32_value(g->mcsat_options.nta_delta);
-    break;
-
-  case PARAM_MCSAT_DIV_NEQ0:
-    print_boolean_value(g->mcsat_options.div_neq0);
+  case PARAM_MCSAT_PARTIAL_RESTART:
+    print_boolean_value(g->mcsat_options.partial_restart);
     break;
 
   case PARAM_MCSAT_RAND_DEC_FREQ:
@@ -5411,8 +5563,9 @@ static bool yices_get_option(smt2_globals_t *g, yices_param_t p) {
     print_int32_value(g->parameters.random_seed);
     break;
 
-  case PARAM_MCSAT_BOOL_FREQ:
-    printf("%f", g->mcsat_options.bool_freq);
+  case PARAM_MCSAT_SUPPLEMENT_CHECK:
+    print_string_value(g->parameters.mcsat_supplement_check == MCSAT_SUPPLEMENT_CHECK_BOTH ?
+                       "both" : "final-only");
     break;
 
   case PARAM_MCSAT_VAR_ORDER:
@@ -5422,10 +5575,10 @@ static bool yices_get_option(smt2_globals_t *g, yices_param_t p) {
   case PARAM_UNKNOWN:
   default:
     freport_bug(g->err,"invalid parameter id in 'yices_get_option'");
-    break;
+    return false;
   }
 
-  return supported;
+  return true;
 }
 
 /*
@@ -5595,7 +5748,7 @@ void smt2_get_info(const char *name) {
     break;
 
   case SMT2_KW_VERSION:
-    print_kw_string_pair(name, yices_version);
+    print_kw_string_pair(name, YTRA_VERSION);
     break;
 
   case SMT2_KW_SMT_LIB_VERSION:
@@ -5694,7 +5847,6 @@ static void yices_set_option(smt2_globals_t *g, const char *param, const param_v
   bool tt;
   int32_t n;
   double x;
-  double r;
   branch_t b;
   ef_gen_option_t gen;
   ivector_t* terms;
@@ -5820,21 +5972,15 @@ static void yices_set_option(smt2_globals_t *g, const char *param, const param_v
     }
     break;
 
-  case PARAM_R_THRESHOLD:
+  case PARAM_R_INITIAL_THRESHOLD:
     if (param_val_to_pos32(param, val, &n, &reason)) {
-      g->parameters.r_threshold = n;
+      g->parameters.r_initial_threshold = n;
     }
     break;
 
-  case PARAM_R_FRACTION:
-    if (param_val_to_ratio(param, val, &x, &reason)) {
-      g->parameters.r_fraction = x;
-    }
-    break;
-
-  case PARAM_R_FACTOR:
-    if (param_val_to_factor(param, val, &x, &reason)) {
-      g->parameters.r_factor = x;
+  case PARAM_R_INTERVAL:
+    if (param_val_to_pos32(param, val, &n, &reason)) {
+      g->parameters.r_interval = n;
     }
     break;
 
@@ -6162,24 +6308,28 @@ static void yices_set_option(smt2_globals_t *g, const char *param, const param_v
     }
     break;
 
-  case PARAM_MCSAT_NO_SIN_PERIOD:
-    if (param_val_to_bool(param, val, &tt, &reason)) {
-      g->mcsat_options.no_sin_period = tt;
+  case PARAM_MCSAT_VAL_DELTA_MODE:
+    if (param_val_to_int32(param, val, &n, &reason)) {
+      if (n <= 0) {
+        print_error("parameter %s must be positive (minimum precision is 1)", param);
+        break;
+      }
+      g->mcsat_options.bool_delta_mode = true;
+      g->mcsat_options.delta_precision = n;
       context = g->ctx;
       if (context != NULL) {
-        context->mcsat_options.no_sin_period = tt;
+        context->mcsat_options.bool_delta_mode = true;
+        context->mcsat_options.delta_precision = n;
       }
     }
     break;
 
-  case PARAM_MCSAT_NTA_DELTA:
-    if (param_val_to_pos32(param, val, &n, &reason)) {
-      g->mcsat_options.nta_delta = n;
-      g->mcsat_options.nta_delta_set = true;
+  case PARAM_MCSAT_L2O:
+    if (param_val_to_bool(param, val, &tt, &reason)) {
+      g->mcsat_options.l2o = tt;
       context = g->ctx;
       if (context != NULL) {
-        context->mcsat_options.nta_delta = n;
-        context->mcsat_options.nta_delta_set = true;
+        context->mcsat_options.l2o = tt;
       }
     }
     break;
@@ -6224,12 +6374,12 @@ static void yices_set_option(smt2_globals_t *g, const char *param, const param_v
     }
     break;
 
-  case PARAM_MCSAT_DIV_NEQ0:
+  case PARAM_MCSAT_PARTIAL_RESTART:
     if (param_val_to_bool(param, val, &tt, &reason)) {
-      g->mcsat_options.div_neq0 = tt;
+      g->mcsat_options.partial_restart = tt;
       context = g->ctx;
       if (context != NULL) {
-        context->mcsat_options.div_neq0 = tt;
+        context->mcsat_options.partial_restart = tt;
       }
     }
     break;
@@ -6246,9 +6396,9 @@ static void yices_set_option(smt2_globals_t *g, const char *param, const param_v
     }
     break;
 
-  case PARAM_MCSAT_BOOL_FREQ:
-    if (param_val_to_ratio(param, val, &r, &reason)) {
-      g->mcsat_options.bool_freq = r;
+  case PARAM_MCSAT_SUPPLEMENT_CHECK:
+    if (param_val_to_mcsat_supplement_check(param, val, &g->parameters.mcsat_supplement_check, &reason)) {
+      // parameter is consumed during check-sat
     }
     break;
 
@@ -6426,15 +6576,13 @@ void smt2_set_info(const char *name, aval_t value) {
     break;
 
   case SMT2_KW_SMT_LIB_VERSION:
-    // quick hack to switch parser if 2.5 is selected
+    // recorded for (get-info :smt-lib-version); string parsing always
+    // follows SMT-LIB 2.6 regardless of the declared version.
     if (g->smtlib_version != 0) {
       print_error("can't set :smt-lib-version twice");
     } else if (aval_is_known_version(g->avtbl, value, &version)) {
       assert(version == 2000 || version == 2500 || version == 2600);
       g->smtlib_version = version;
-      if (version >= 2500) {
-        smt2_lexer_activate_two_dot_five();
-      }
       report_success();
     } else {
       print_error("unsupported :smt-lib-version");
@@ -6448,6 +6596,29 @@ void smt2_set_info(const char *name, aval_t value) {
   }
 }
 
+/*
+ * Declaration of a symbol, defined below with the other declaration commands
+ * - n = arity
+ * - tau = array of n+1 types: the domain, then the range
+ * - in_model = true if the symbol must be listed when a model is printed
+ */
+static void declare_fun(const char *name, uint32_t n, const type_t *tau, bool in_model);
+
+/*
+ * Declare the symbols that the MCSAT plugins of logic code interpret (for QF_TRA: pi, sin
+ * and exp). Called by set-logic, and by reset-assertions when it resets the term tables.
+ */
+static void declare_interpreted_symbols(smt_logic_t code) {
+  uint32_t n, i;
+
+  n = mcsat_num_interpreted_symbols(code);
+  for (i = 0; i < n; i ++) {
+    const mcsat_symbol_t *symbol = mcsat_interpreted_symbol(code, i);
+    // Not listed in models: their meaning is fixed by the plugin, not chosen
+    // by the solver, so printing them is noise
+    declare_fun(symbol->name, symbol->arity, symbol->signature, false);
+  }
+}
 
 /*
  * Set the logic:
@@ -6473,7 +6644,7 @@ void smt2_set_logic(const char *name) {
     arch = ef_arch_for_logic(code);
   } else if (logic_is_supported(code)) {
     __smt2_globals.efmode = false;
-    arch = arch_for_logic(code);
+    arch = smt2_arch_for_logic(&__smt2_globals, code);
   } else {
     print_error("logic %s is not supported", name);
     return;
@@ -6490,7 +6661,7 @@ void smt2_set_logic(const char *name) {
   }
 
   // if mcsat was requested, check whether the logic is supported by the MCSAT solver
-  if (__smt2_globals.mcsat && !logic_is_supported_by_mcsat(code)) {
+  if (__smt2_globals.mcsat && !__smt2_globals.force_dpllt && !logic_is_supported_by_mcsat(code)) {
     print_error("logic %s is not supported by the mcsat solver", name);
     return;
   }
@@ -6503,7 +6674,7 @@ void smt2_set_logic(const char *name) {
 
   // in efmode : can't use the mcsat solver and must not be incremental
   if (__smt2_globals.efmode) {
-    if (__smt2_globals.mcsat) {
+    if (__smt2_globals.mcsat && !__smt2_globals.force_dpllt) {
       print_error("the mcsat solver does not support quantifiers");
       return;
     }
@@ -6517,16 +6688,17 @@ void smt2_set_logic(const char *name) {
     }
   }
 
-  // if unsat cores or unsat assumptions are requested, we can't use the mcsat solver
-  if (__smt2_globals.produce_unsat_cores || __smt2_globals.produce_unsat_assumptions) {
-    if (__smt2_globals.mcsat) {
-      print_error("the mcsat solver does not support unsat cores");
-      return;
-    }
-    if (arch == CTX_ARCH_MCSAT) {
-      print_error("unsat cores are not supported in logic %s", name);
-      return;
-    }
+  // Set model_interpolation if unsat cores are enabled and architecture is MCSAT
+  if ((__smt2_globals.produce_unsat_cores || __smt2_globals.produce_unsat_assumptions) &&
+      (arch == CTX_ARCH_MCSAT || (__smt2_globals.mcsat && !__smt2_globals.force_dpllt))) {
+    __smt2_globals.mcsat_options.model_interpolation = true;
+  }
+
+
+
+  // if logic is QF_NIA, enable l2o
+  if (code == QF_NIA && !__smt2_globals.mcsat_options.l2o) {
+    __smt2_globals.mcsat_options.l2o = true;
   }
 
   smt2_lexer_activate_logic(code);
@@ -6547,6 +6719,8 @@ void smt2_set_logic(const char *name) {
     default_ctx_params(&__smt2_globals.ctx_parameters, code, arch, CTX_MODE_ONECHECK);
     yices_set_default_params(&__smt2_globals.parameters, code, arch, CTX_MODE_ONECHECK);
   }
+
+  declare_interpreted_symbols(code);
 
   report_success();
 }
@@ -6813,12 +6987,10 @@ void smt2_check_sat(void) {
        * Non incremental
        */
       if (__smt2_globals.efmode) {
-        printf("efsolve\n");
         efsolve_cmd(&__smt2_globals);
       } else if (__smt2_globals.frozen) {
         print_error("multiple calls to (check-sat) are not allowed in non-incremental mode");
       } else if (__smt2_globals.produce_unsat_cores) {
-        printf("delayed\n");
         delayed_assertions_unsat_core(&__smt2_globals);
       } else {
         // show_delayed_assertions(&__smt2_globals);
@@ -6881,13 +7053,26 @@ void smt2_check_sat_assuming(uint32_t n, signed_symbol_t *a) {
  * - values = array of values
  */
 void smt2_check_sat_assuming_model(uint32_t n, const term_t vars[], const term_t values[]) {
+  uint32_t i, j;
+  bool repeated;
+
   __smt2_globals.stats.num_check_sat_assuming_model ++;
   __smt2_globals.stats.num_commands ++;
   tprint_calls("check-sat-assuming-model", __smt2_globals.stats.num_check_sat_assuming_model);
 
+  // The model of the assumptions holds one value per variable
+  repeated = false;
+  for (i = 0; i < n && !repeated; ++ i) {
+    for (j = i + 1; j < n && !repeated; ++ j) {
+      repeated = vars[i] == vars[j];
+    }
+  }
+
   if (check_logic()) {
     if (!mcsat_enabled(&__smt2_globals)) {
       print_error("check-sat-assuming-model is only supported in MCSAT");
+    } else if (repeated) {
+      print_error("a variable is given twice in check-sat-assuming-model");
     } else if (__smt2_globals.benchmark_mode) {
       if (__smt2_globals.efmode) {
         print_error("the exists/forall solver does not support check-sat with assumptions");
@@ -6974,19 +7159,51 @@ void smt2_define_sort(const char *name, uint32_t n, type_t *var, type_t body) {
 
 
 /*
+ * Declare name as an uninterpreted constant of type tau[0] if n = 0, and as an
+ * uninterpreted function of type tau[0] x ... x tau[n-1] to tau[n] otherwise.
+ * Shared by smt2_declare_fun and by smt2_set_logic, which uses it to declare
+ * the symbols the MCSAT plugins of the logic interpret.
+ */
+static void declare_fun(const char *name, uint32_t n, const type_t *tau, bool in_model) {
+  term_t t;
+  type_t sigma;
+
+  sigma = tau[n]; // range
+  if (n > 0) {
+    sigma = yices_function_type(n, tau, sigma);
+  }
+  assert(sigma != NULL_TYPE);
+
+  t = yices_new_uninterpreted_term(sigma);
+  assert(t != NULL_TERM);
+  yices_set_term_name(t, name);
+  save_term_name(&__smt2_globals, name);
+  if (in_model) {
+    save_name_for_model(&__smt2_globals, name);
+  }
+
+  /*
+   * Record array-constant declarations so that the model printer can
+   * emit them in SMT-LIB store/const form rather than as a function
+   * with parameters. A 0-arity declaration whose internal Yices type
+   * is a unary function type can only have come from (Array K V) in
+   * the SMT-LIB grammar (directly, via define-sort, or nested).
+   */
+  if (n == 0
+      && is_function_type(__yices_globals.types, sigma)
+      && function_type_arity(__yices_globals.types, sigma) == 1) {
+    int_hmap_pair_t *p = int_hmap_get(&__smt2_globals.array_const_terms, t);
+    p->val = 1;
+  }
+}
+
+/*
  * Declare a new uninterpreted function symbol
  * - name = function name
  * - n = arity + 1
  * - tau = array of n types
- *
- * If n = 1, this creates an uninterpreted constant of type tau[0]
- * Otherwise, this creates an uninterpreted function of type
- * tau[0] x ... x tau[n-1] to tau[n]
  */
 void smt2_declare_fun(const char *name, uint32_t n, type_t *tau) {
-  term_t t;
-  type_t sigma;
-
   assert(n > 0);
 
   __smt2_globals.stats.num_declare_fun ++;
@@ -6994,19 +7211,7 @@ void smt2_declare_fun(const char *name, uint32_t n, type_t *tau) {
   tprint_calls("declare-fun", __smt2_globals.stats.num_declare_fun);
 
   if (check_logic()) {
-    n --;
-    sigma = tau[n]; // range
-    if (n > 0) {
-      sigma = yices_function_type(n, tau, sigma);
-    }
-    assert(sigma != NULL_TYPE);
-
-    t = yices_new_uninterpreted_term(sigma);
-    assert(t != NULL_TERM);
-    yices_set_term_name(t, name);
-    save_term_name(&__smt2_globals, name);
-    save_name_for_model(&__smt2_globals, name);
-
+    declare_fun(name, n - 1, tau, true);
     report_success();
   }
 }
@@ -7102,9 +7307,22 @@ void smt2_get_model(void) {
 
 /*
  * Print s on the output channel
+ *
+ * The SMT-LIB standard requires (echo s) to print the string literal s back
+ * "as is", including the surrounding double quotes (§4.2.9). The lexer has
+ * stripped the quotes and decoded the escapes, so we reconstruct a valid
+ * literal: per §3.1 a double quote is escaped by doubling it ("").
  */
 void smt2_echo(const char *s) {
-  print_out("%s\n", s);
+  print_out("\"");
+  for (; *s != '\0'; s++) {
+    if (*s == '"') {
+      print_out("\"\"");
+    } else {
+      print_out("%c", *s);
+    }
+  }
+  print_out("\"\n");
   flush_out();
 }
 
@@ -7175,10 +7393,16 @@ void smt2_reset_assertions(void) {
       ivector_reset(&g->val_vector);
 
       /*
-       * Reset the internal name tables, unless global_decls is set
+       * Reset the internal name tables, unless global_decls is set.
+       * yices_reset_tables() recycles term ids, so we must also drop
+       * stale array-constant markers; otherwise they could alias
+       * freshly minted unrelated terms after the reset. The reset also
+       * deletes the symbols declared by set-logic: declare them again.
        */
       if (!g->global_decls) {
         yices_reset_tables();
+        int_hmap_reset(&g->array_const_terms);
+        declare_interpreted_symbols(g->logic_code);
       }
 
       // build a fresh empty context
@@ -7289,5 +7513,14 @@ void smt2_add_pattern(int32_t op, term_t t, term_t *p, uint32_t n) {
  * Enables the mcsat solver.
  */
 void smt2_enable_mcsat(void) {
+  assert(!__smt2_globals.force_dpllt);
   __smt2_globals.mcsat = true;
+}
+
+/*
+ * Force CDCL(T) architecture in SMT2 mode.
+ */
+void smt2_force_dpllt(void) {
+  assert(!__smt2_globals.mcsat);
+  __smt2_globals.force_dpllt = true;
 }

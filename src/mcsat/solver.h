@@ -44,16 +44,6 @@ void mcsat_destruct(mcsat_solver_t* mcsat);
 smt_status_t mcsat_status(const mcsat_solver_t* mcsat);
 
 /*
- * Return true if any constraint in the trail used delta mode.
- */
-bool mcsat_delta_used_in_trail(const mcsat_solver_t* mcsat);
-
-/*
- * Return the configured delta value (0 if unset).
- */
-int32_t mcsat_get_nta_delta(const mcsat_solver_t* mcsat);
-
-/*
  * Remove all assertions.
  */
 void mcsat_reset(mcsat_solver_t* mcsat);
@@ -104,14 +94,43 @@ void mcsat_set_model_hint(mcsat_solver_t *mcsat, model_t* mdl, uint32_t n, const
 void mcsat_solve(mcsat_solver_t* mcsat, const param_t *params, model_t* mdl, uint32_t n, const term_t mdl_filter[]);
 
 /*
+ * Remove temporary assumption decisions and return to base level.
+ */
+void mcsat_cleanup_assumptions(mcsat_solver_t* mcsat);
+
+/*
  * Add the model to the yices model
  */
 void mcsat_build_model(mcsat_solver_t* mcsat, model_t* model);
 
 /*
  * Get model interpolant.
+ *
+ * The returned term is always in the public / post-unblast world: it
+ * refers only to the user's original tuple and function atoms via
+ * select/application, never to the internal tuple-blasted leaf
+ * variables introduced by the preprocessor. Internal writers must
+ * therefore unblast before storing (see mcsat_set_interpolant_from_internal
+ * in solver.c); callers that already hold a public-world term may assign
+ * to the field directly via mcsat_set_unsat_result_from_labeled_interpolant
+ * below.
  */
 term_t mcsat_get_unsat_model_interpolant(mcsat_solver_t* mcsat);
+
+/*
+ * Restore sticky UNSAT result from a public/postprocessed interpolant by
+ * replacing temporary assumption labels with the user's original
+ * assumptions.
+ *
+ * Pre-condition: `interpolant` is already in the public / post-unblast
+ * world. This entry point performs only label-for-assumption
+ * substitution -- it does NOT run preprocessor_unblast_term -- so
+ * passing an internal-world term here would leak blasted leaf variables
+ * into the sticky interpolant.
+ */
+void mcsat_set_unsat_result_from_labeled_interpolant(mcsat_solver_t* mcsat, term_t interpolant,
+                                                     uint32_t n, const term_t* labels,
+                                                     const term_t* assumptions);
 
 /*
  * Interrupt the search
@@ -152,7 +171,19 @@ void mcsat_gc_mark(mcsat_solver_t* mcsat);
  */
 void mcsat_set_exception_handler(mcsat_solver_t* mcsat, jmp_buf* handler);
 
-/* Set whether to use the period variable for sin abstraction. */
-void mcsat_set_use_period_for_sin(mcsat_solver_t* mcsat, bool use_period_for_sin);
+/*
+ * Return True iff delta option passed in input.
+ */
+bool mcsat_is_delta_mode_enabled(const mcsat_solver_t* mcsat);
+
+/*
+ * Return the configured delta value.
+ */
+int32_t mcsat_get_delta(const mcsat_solver_t* mcsat);
+
+/*
+ * Return true if any constraint in the trail used delta mode.
+ */
+bool mcsat_delta_used(const mcsat_solver_t* mcsat);
 
 #endif /* MCSAT_SOLVER_H_ */

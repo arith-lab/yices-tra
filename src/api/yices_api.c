@@ -73,6 +73,8 @@
 
 #include "exists_forall/ef_client.h"
 
+#include "solvers/cdcl/delegate.h"
+
 #include "frontend/yices/yices_parser.h"
 
 #include "io/model_printer.h"
@@ -107,6 +109,8 @@
 #include "utils/string_utils.h"
 
 #ifdef HAVE_MCSAT
+#include <flint/flint.h>
+#include <mpfr.h>
 #include <poly/algebraic_number.h>
 #else
 // We need a definition for (lp_algebraic_number_t *)
@@ -1021,7 +1025,13 @@ static void init_globals(yices_globals_t *glob) {
   glob->fvars = NULL;
 
 #ifdef THREAD_SAFE
-  create_yices_lock(&(glob->lock));
+  /*
+   * Recursive: the supplemental MCSAT satellite may re-acquire the
+   * global lock from internalization paths where the outer API call
+   * already holds it.  The satellite also uses this lock to serialize
+   * embedded MCSAT operations reached from unlocked CDCL(T) search.
+   */
+  create_yices_recursive_lock(&(glob->lock));
 #endif
 
 }
@@ -1136,6 +1146,13 @@ EXPORTED void yices_exit(void) {
 
   cleanup_rationals();
   cleanup_bvconstants();
+
+#ifdef HAVE_MCSAT
+  // The caches of FLINT (among them Arb's constants, such as pi) and of MPFR, which the TRA
+  // plugin fills. Both libraries rebuild them on demand, so yices_init may follow.
+  flint_cleanup();
+  mpfr_free_cache();
+#endif
 
   free_yices_error();
 }
@@ -1579,7 +1596,7 @@ static inline void type_vector_push(type_vector_t *v, type_t tau) {
  */
 
 // Check whether n (as mpz) is positive
-static bool check_positive_mpz(mpz_t n) {
+static bool check_positive_mpz(const mpz_t n) {
   if (mpz_sgn(n) != 1) {
     error_report_t *error = get_yices_error();
     error->code = POS_INT_REQUIRED;
@@ -2534,6 +2551,63 @@ static bool check_good_vars_or_uninterpreted(term_manager_t *mngr, uint32_t n, c
   return true;
 }
 
+static bool mcsat_assumption_type_supported(type_table_t *types, type_t tau) {
+  type_kind_t kind = type_kind(types, tau);
+  uint32_t i;
+
+  switch (kind) {
+  case BOOL_TYPE:
+  case INT_TYPE:
+  case REAL_TYPE:
+  case SCALAR_TYPE:
+  case BITVECTOR_TYPE:
+    return true;
+
+  case TUPLE_TYPE: {
+    tuple_type_t *tuple = tuple_type_desc(types, tau);
+    for (i = 0; i < tuple->nelem; i++) {
+      if (! mcsat_assumption_type_supported(types, tuple->elem[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  default:
+    return false;
+  }
+}
+
+// Check that the type of every term in v is one that the MCSAT solver can
+// decide on as an assumption value. Tuple types are supported if all their
+// recursively flattened leaves are supported scalar decision types. Other
+// type kinds (UNINTERPRETED_TYPE, FUNCTION_TYPE, FF_TYPE, etc.) reach the
+// MCSAT solver but trigger an assertion failure inside
+// mcsat_value_construct_from_value (or a NULL decide_assignment dispatch),
+// so we reject them here with a clear error code (issue #615).
+//
+// All elements of v must already be good terms.
+static bool check_mcsat_assumption_types(term_manager_t *mngr, uint32_t n, const term_t *v) {
+  term_table_t *tbl;
+  type_table_t *types;
+  uint32_t i;
+
+  tbl = term_manager_get_terms(mngr);
+  types = tbl->types;
+  for (i=0; i<n; i++) {
+    type_t tau = term_type(tbl, v[i]);
+    if (! mcsat_assumption_type_supported(types, tau)) {
+      error_report_t *error = get_yices_error();
+      error->code = MCSAT_ERROR_ASSUMPTION_TYPE_NOT_SUPPORTED;
+      error->term1 = v[i];
+      error->type1 = tau;
+      return false;
+    }
+  }
+
+  return true;
+}
+
 // Check whether arrays v and a define a valid substitution
 // both must be arrays of n elements
 static bool check_good_substitution(term_manager_t *mngr, uint32_t n, const term_t *v, const term_t *a) {
@@ -2567,6 +2641,9 @@ static bool check_good_substitution(term_manager_t *mngr, uint32_t n, const term
 /*
  * Support for incremental model construction
  */
+static model_t *clone_model_structure(model_t *src);
+static inline error_code_t yices_eval_error(int32_t v);
+
 // check that var is uninterpreted.
 static bool check_uninterpreted(term_table_t *terms, term_t var) {
   if (is_neg_term(var) || term_kind(terms, var) != UNINTERPRETED_TERM) {
@@ -2579,8 +2656,76 @@ static bool check_uninterpreted(term_table_t *terms, term_t var) {
   return true;
 }
 
-// check that var has no value in model
-static bool check_unassigned_in_model(model_t *model, term_t var) {
+static void clear_model_aliases(model_t *model) {
+  if (model->alias_map != NULL) {
+    delete_int_hmap(model->alias_map);
+    safe_free(model->alias_map);
+    model->alias_map = NULL;
+  }
+}
+
+static bool flatten_model_aliases(model_t *model) {
+  model_t *eval_model;
+  int_hmap_pair_t *r;
+  term_t *var;
+  value_t *eval_value;
+  vtbl_copy_t copy;
+  value_t v;
+  uint32_t i, n;
+
+  if (model->alias_map == NULL) {
+    return true;
+  }
+
+  n = model->alias_map->nelems;
+  if (n == 0) {
+    clear_model_aliases(model);
+    return true;
+  }
+
+  eval_model = clone_model_structure(model);
+  var = (term_t *) safe_malloc(n * sizeof(term_t));
+  eval_value = (value_t *) safe_malloc(n * sizeof(value_t));
+
+  i = 0;
+  r = int_hmap_first_record(model->alias_map);
+  while (r != NULL) {
+    assert(i < n);
+    v = model_get_term_value(eval_model, r->key);
+    if (v < 0) {
+      set_error_code(yices_eval_error(v));
+      safe_free(eval_value);
+      safe_free(var);
+      _o_yices_free_model(eval_model);
+      return false;
+    }
+    var[i] = r->key;
+    eval_value[i] = v;
+    i ++;
+    r = int_hmap_next_record(model->alias_map, r);
+  }
+  assert(i == n);
+
+  init_vtbl_copy(&copy, model_get_vtbl(eval_model), model_get_vtbl(model));
+  for (i=0; i<n; i++) {
+    model_map_term(model, var[i], vtbl_copy_value(&copy, eval_value[i]));
+  }
+  delete_vtbl_copy(&copy);
+  clear_model_aliases(model);
+
+  safe_free(eval_value);
+  safe_free(var);
+  _o_yices_free_model(eval_model);
+
+  return true;
+}
+
+// Flatten aliases, then check that var has no value in model.
+static bool prepare_model_append(model_t *model, term_t var) {
+  if (! flatten_model_aliases(model)) {
+    return false;
+  }
+
   if (model_find_term_value(model, var) != null_value) {
     error_report_t *error = get_yices_error();
     error->code = MDL_DUPLICATE_VAR;
@@ -2868,11 +3013,16 @@ type_t _o_yices_bv_type(uint32_t size) {
   return bv_type(__yices_globals.types, size);
 }
 
+EXPORTED type_t yices_ff_type(mpz_t order) {
+  MT_PROTECT(type_t, __yices_globals.lock, _o_yices_ff_type(order));
+}
+
 type_t _o_yices_ff_type(mpz_t order) {
   if (! check_positive_mpz(order)) {
     return NULL_TYPE;
   }
   if (! mpz_probab_prime_p(order, 18)) {
+    set_error_code(INVALID_FFSIZE);
     return NULL_TYPE;
   }
   return ff_type(__yices_globals.types, order);
@@ -4158,6 +4308,313 @@ term_t _o_yices_ceil(term_t t) {
   }
 
   return mk_arith_ceil(__yices_globals.manager, t);
+}
+
+#ifdef __GMP_H__
+EXPORTED term_t yices_ff_const(const mpz_t val, const mpz_t mod) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_const(val, mod));
+}
+
+term_t _o_yices_ff_const(const mpz_t val, const mpz_t mod) {
+  rational_t ff_mod;
+  term_t t;
+
+  if (! check_positive_mpz(mod)) {
+    return NULL_TERM;
+  }
+  if (! mpz_probab_prime_p(mod, 18)) {
+    set_error_code(INVALID_FFSIZE);
+    return NULL_TERM;
+  }
+
+  q_init(&ff_mod);
+  q_set_mpz(&r0, val);
+  q_set_mpz(&ff_mod, mod);
+  t = mk_arith_ff_constant(__yices_globals.manager, &r0, &ff_mod);
+  q_clear(&ff_mod);
+
+  return t;
+}
+#endif
+
+static bool check_ff_compatible_terms(term_manager_t *mngr, term_t t1, term_t t2) {
+  term_table_t *tbl;
+  type_t tau1, tau2;
+
+  if (! check_good_term(mngr, t1) || ! check_good_term(mngr, t2) ||
+      ! check_arith_ff_term(mngr, t1) || ! check_arith_ff_term(mngr, t2)) {
+    return false;
+  }
+
+  tbl = term_manager_get_terms(mngr);
+  tau1 = term_type(tbl, t1);
+  tau2 = term_type(tbl, t2);
+  if (tau1 != tau2) {
+    error_report_t *error = get_yices_error();
+    error->code = INCOMPATIBLE_FFSIZES;
+    error->term1 = t1;
+    error->type1 = tau1;
+    error->term2 = t2;
+    error->type2 = tau2;
+    return false;
+  }
+
+  return true;
+}
+
+static bool check_ff_terms(term_manager_t *mngr, uint32_t n, const term_t t[]) {
+  term_table_t *tbl;
+  type_t tau;
+  uint32_t i;
+
+  if (! check_positive(n) || ! check_good_terms(mngr, n, t)) {
+    return false;
+  }
+  if (! check_arith_ff_term(mngr, t[0])) {
+    return false;
+  }
+
+  tbl = term_manager_get_terms(mngr);
+  tau = term_type(tbl, t[0]);
+  for (i=1; i<n; i++) {
+    if (! check_arith_ff_term(mngr, t[i])) {
+      return false;
+    }
+    if (term_type(tbl, t[i]) != tau) {
+      error_report_t *error = get_yices_error();
+      error->code = INCOMPATIBLE_FFSIZES;
+      error->term1 = t[0];
+      error->type1 = tau;
+      error->term2 = t[i];
+      error->type2 = term_type(tbl, t[i]);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+EXPORTED term_t yices_ff_add(term_t t1, term_t t2) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_add(t1, t2));
+}
+
+term_t _o_yices_ff_add(term_t t1, term_t t2) {
+  rba_buffer_t *b;
+  term_table_t *tbl;
+
+  if (! check_ff_compatible_terms(__yices_globals.manager, t1, t2)) {
+    return NULL_TERM;
+  }
+
+  b = get_arith_buffer();
+  tbl = __yices_globals.terms;
+  reset_rba_buffer(b);
+  rba_buffer_add_term(b, tbl, t1);
+  rba_buffer_add_term(b, tbl, t2);
+
+  return mk_arith_ff_term(__yices_globals.manager, b, finitefield_term_order(tbl, t1));
+}
+
+EXPORTED term_t yices_ff_sub(term_t t1, term_t t2) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_sub(t1, t2));
+}
+
+term_t _o_yices_ff_sub(term_t t1, term_t t2) {
+  rba_buffer_t *b;
+  term_table_t *tbl;
+
+  if (! check_ff_compatible_terms(__yices_globals.manager, t1, t2)) {
+    return NULL_TERM;
+  }
+
+  b = get_arith_buffer();
+  tbl = __yices_globals.terms;
+  reset_rba_buffer(b);
+  rba_buffer_add_term(b, tbl, t1);
+  rba_buffer_sub_term(b, tbl, t2);
+
+  return mk_arith_ff_term(__yices_globals.manager, b, finitefield_term_order(tbl, t1));
+}
+
+EXPORTED term_t yices_ff_neg(term_t t) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_neg(t));
+}
+
+term_t _o_yices_ff_neg(term_t t) {
+  rba_buffer_t *b;
+  term_table_t *tbl;
+
+  if (! check_good_term(__yices_globals.manager, t) ||
+      ! check_arith_ff_term(__yices_globals.manager, t)) {
+    return NULL_TERM;
+  }
+
+  b = get_arith_buffer();
+  tbl = __yices_globals.terms;
+  reset_rba_buffer(b);
+  rba_buffer_sub_term(b, tbl, t);
+
+  return mk_arith_ff_term(__yices_globals.manager, b, finitefield_term_order(tbl, t));
+}
+
+EXPORTED term_t yices_ff_mul(term_t t1, term_t t2) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_mul(t1, t2));
+}
+
+term_t _o_yices_ff_mul(term_t t1, term_t t2) {
+  rba_buffer_t *b;
+  term_table_t *tbl;
+
+  if (! check_ff_compatible_terms(__yices_globals.manager, t1, t2) ||
+      ! check_product_degree(__yices_globals.manager, t1, t2)) {
+    return NULL_TERM;
+  }
+
+  b = get_arith_buffer();
+  tbl = __yices_globals.terms;
+  reset_rba_buffer(b);
+  rba_buffer_add_term(b, tbl, t1);
+  rba_buffer_mul_term(b, tbl, t2);
+
+  return mk_arith_ff_term(__yices_globals.manager, b, finitefield_term_order(tbl, t1));
+}
+
+EXPORTED term_t yices_ff_square(term_t t) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_square(t));
+}
+
+term_t _o_yices_ff_square(term_t t) {
+  rba_buffer_t *b;
+  term_table_t *tbl;
+
+  if (! check_good_term(__yices_globals.manager, t) ||
+      ! check_arith_ff_term(__yices_globals.manager, t) ||
+      ! check_square_degree(__yices_globals.manager, t)) {
+    return NULL_TERM;
+  }
+
+  b = get_arith_buffer();
+  tbl = __yices_globals.terms;
+  reset_rba_buffer(b);
+  rba_buffer_add_term(b, tbl, t);
+  rba_buffer_mul_term(b, tbl, t);
+
+  return mk_arith_ff_term(__yices_globals.manager, b, finitefield_term_order(tbl, t));
+}
+
+EXPORTED term_t yices_ff_power(term_t t, uint32_t d) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_power(t, d));
+}
+
+term_t _o_yices_ff_power(term_t t, uint32_t d) {
+  rba_buffer_t *b;
+  term_table_t *tbl;
+
+  if (! check_good_term(__yices_globals.manager, t) ||
+      ! check_arith_ff_term(__yices_globals.manager, t) ||
+      ! check_power_degree(__yices_globals.manager, t, d)) {
+    return NULL_TERM;
+  }
+
+  b = get_arith_buffer();
+  tbl = __yices_globals.terms;
+  rba_buffer_set_one(b);
+  rba_buffer_mul_term_power(b, tbl, t, d);
+
+  return mk_arith_ff_term(__yices_globals.manager, b, finitefield_term_order(tbl, t));
+}
+
+EXPORTED term_t yices_ff_sum(uint32_t n, const term_t t[]) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_sum(n, t));
+}
+
+term_t _o_yices_ff_sum(uint32_t n, const term_t t[]) {
+  rba_buffer_t *b;
+  term_table_t *tbl;
+  uint32_t i;
+
+  if (! check_ff_terms(__yices_globals.manager, n, t)) {
+    return NULL_TERM;
+  }
+
+  b = get_arith_buffer();
+  tbl = __yices_globals.terms;
+  reset_rba_buffer(b);
+  for (i=0; i<n; i++) {
+    rba_buffer_add_term(b, tbl, t[i]);
+  }
+
+  return mk_arith_ff_term(__yices_globals.manager, b, finitefield_term_order(tbl, t[0]));
+}
+
+EXPORTED term_t yices_ff_product(uint32_t n, const term_t t[]) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_product(n, t));
+}
+
+term_t _o_yices_ff_product(uint32_t n, const term_t t[]) {
+  rba_buffer_t *b;
+  term_table_t *tbl;
+  uint32_t i;
+
+  if (! check_ff_terms(__yices_globals.manager, n, t) ||
+      ! check_multi_prod_degree(__yices_globals.manager, n, t)) {
+    return NULL_TERM;
+  }
+
+  b = get_arith_buffer();
+  tbl = __yices_globals.terms;
+  rba_buffer_set_one(b);
+  for (i=0; i<n; i++) {
+    rba_buffer_mul_term(b, tbl, t[i]);
+  }
+
+  return mk_arith_ff_term(__yices_globals.manager, b, finitefield_term_order(tbl, t[0]));
+}
+
+EXPORTED term_t yices_ff_eq_atom(term_t t1, term_t t2) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_eq_atom(t1, t2));
+}
+
+term_t _o_yices_ff_eq_atom(term_t t1, term_t t2) {
+  if (! check_ff_compatible_terms(__yices_globals.manager, t1, t2)) {
+    return NULL_TERM;
+  }
+  return mk_arith_ff_eq(__yices_globals.manager, t1, t2);
+}
+
+EXPORTED term_t yices_ff_neq_atom(term_t t1, term_t t2) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_neq_atom(t1, t2));
+}
+
+term_t _o_yices_ff_neq_atom(term_t t1, term_t t2) {
+  if (! check_ff_compatible_terms(__yices_globals.manager, t1, t2)) {
+    return NULL_TERM;
+  }
+  return mk_arith_ff_neq(__yices_globals.manager, t1, t2);
+}
+
+EXPORTED term_t yices_ff_eq0_atom(term_t t) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_eq0_atom(t));
+}
+
+term_t _o_yices_ff_eq0_atom(term_t t) {
+  if (! check_good_term(__yices_globals.manager, t) ||
+      ! check_arith_ff_term(__yices_globals.manager, t)) {
+    return NULL_TERM;
+  }
+  return mk_arith_ff_term_eq0(__yices_globals.manager, t);
+}
+
+EXPORTED term_t yices_ff_neq0_atom(term_t t) {
+  MT_PROTECT(term_t, __yices_globals.lock, _o_yices_ff_neq0_atom(t));
+}
+
+term_t _o_yices_ff_neq0_atom(term_t t) {
+  if (! check_good_term(__yices_globals.manager, t) ||
+      ! check_arith_ff_term(__yices_globals.manager, t)) {
+    return NULL_TERM;
+  }
+  return mk_arith_ff_term_neq0(__yices_globals.manager, t);
 }
 
 
@@ -7230,13 +7687,13 @@ int32_t _o_yices_rational_const_value(term_t t, mpq_t q) {
   return 0;
 }
 
-EXPORTED int32_t yices_finitefield_const_value(term_t t, mpz_t z) {
-  MT_PROTECT(int32_t,  __yices_globals.lock, _o_yices_finitefield_const_value(t, z));
+EXPORTED int32_t yices_ff_const_value(term_t t, mpz_t z) {
+  MT_PROTECT(int32_t,  __yices_globals.lock, _o_yices_ff_const_value(t, z));
 }
 
-int32_t _o_yices_finitefield_const_value(term_t t, mpz_t z) {
+int32_t _o_yices_ff_const_value(term_t t, mpz_t z) {
   if (! check_good_term(__yices_globals.manager, t) ||
-      ! check_constructor(__yices_globals.terms, t, YICES_ARITH_FF_CONSTANT)) {
+      ! check_constructor(__yices_globals.terms, t, YICES_FF_CONSTANT)) {
     return -1;
   }
   arith_ff_const_value(__yices_globals.terms, t, z);
@@ -7257,12 +7714,36 @@ EXPORTED int32_t yices_sum_component(term_t t, int32_t i, mpq_t coeff, term_t *t
 
 int32_t _o_yices_sum_component(term_t t, int32_t i, mpq_t coeff, term_t *term) {
   if (! check_good_term(__yices_globals.manager, t) ||
-      !(check_constructor(__yices_globals.terms, t, YICES_ARITH_SUM) ||
-        check_constructor(__yices_globals.terms, t, YICES_ARITH_FF_SUM)) ||
+      ! check_constructor(__yices_globals.terms, t, YICES_ARITH_SUM) ||
       ! check_child_idx(__yices_globals.terms, t, i)) {
     return -1;
   }
   sum_term_component(__yices_globals.terms, t, i, coeff, term);
+  return 0;
+}
+
+EXPORTED int32_t yices_ffsum_component(term_t t, int32_t i, mpz_t coeff, term_t *term) {
+  MT_PROTECT(int32_t,  __yices_globals.lock, _o_yices_ffsum_component(t, i, coeff, term));
+}
+
+int32_t _o_yices_ffsum_component(term_t t, int32_t i, mpz_t coeff, term_t *term) {
+  polynomial_t *p;
+  term_t v;
+
+  if (! check_good_term(__yices_globals.manager, t) ||
+      ! check_constructor(__yices_globals.terms, t, YICES_FF_SUM) ||
+      ! check_child_idx(__yices_globals.terms, t, i)) {
+    return -1;
+  }
+
+  p = finitefield_poly_term_desc(__yices_globals.terms, t);
+  v = p->mono[i].var;
+  if (v == const_idx) {
+    v = NULL_TERM;
+  }
+  *term = v;
+  q_get_mpz(&p->mono[i].coeff, coeff);
+
   return 0;
 }
 
@@ -8475,6 +8956,7 @@ context_t *_o_yices_new_context(const ctx_config_t *config) {
   context_mode_t mode;
   bool iflag;
   bool qflag;
+  bool mcsat_supplement;
   int32_t k;
 
   if (config == NULL) {
@@ -8484,20 +8966,41 @@ context_t *_o_yices_new_context(const ctx_config_t *config) {
     mode = CTX_MODE_PUSHPOP;
     iflag = true;
     qflag = false;
+    mcsat_supplement = false;
   } else {
     // read the config
-    k = decode_config(config, &logic, &arch, &mode, &iflag, &qflag);
+    k = decode_config(config, &logic, &arch, &mode, &iflag, &qflag, &mcsat_supplement);
     if (k < 0) {
       // invalid configuration
       set_error_code(CTX_INVALID_CONFIG);
       return NULL;
     }
+    if (config->sat_delegate_incremental_mode_set &&
+        config->sat_delegate != SAT_DELEGATE_NONE) {
+      if ((mode == CTX_MODE_ONECHECK &&
+           config->sat_delegate_incremental_mode != SAT_DELEGATE_MODE_REBUILD) ||
+          !sat_delegate_incremental_mode_supported(config->sat_delegate,
+                                                   config->sat_delegate_incremental_mode)) {
+        set_error_code(CTX_OPERATION_NOT_SUPPORTED);
+        return NULL;
+      }
+    }
   }
 
   context_t* ctx = _o_yices_create_context(logic, arch, mode, iflag, qflag);
+  if (mcsat_supplement && context_attach_mcsat_supplement(ctx) < 0) {
+    delete_context(ctx);
+    free_context(ctx);
+    set_error_code(CTX_INVALID_CONFIG);
+    return NULL;
+  }
 
   // Additional setup for MCSAT options in the config
   if (config != NULL) {
+    ctx->sat_delegate = config->sat_delegate;
+    ctx->sat_delegate_incremental_mode = config->sat_delegate_incremental_mode;
+    ctx->sat_delegate_incremental_mode_set = config->sat_delegate_incremental_mode_set;
+
     // If trace tags are passed in, set them
     if (config->trace_tags != NULL) {
       // Make new tracer
@@ -8566,7 +9069,7 @@ EXPORTED void yices_reset_context(context_t *ctx) {
  * - if the context status is UNSAT or SEARCHING or INTERRUPTED
  *   code = CTX_INVALID_OPERATION
  */
-EXPORTED int32_t yices_push(context_t *ctx) {
+static int32_t _o_yices_push(context_t *ctx) {
   if (! context_supports_pushpop(ctx)) {
     set_error_code(CTX_OPERATION_NOT_SUPPORTED);
     return -1;
@@ -8606,6 +9109,36 @@ EXPORTED int32_t yices_push(context_t *ctx) {
   return 0;
 }
 
+/*
+ * yices_push and yices_pop both mutate per-context MCSAT state
+ * (mcsat->trail, plugin internal state, scope holder, preprocessor)
+ * via context_clear / context_clear_unsat / context_push / context_pop.
+ *
+ * yices_garbage_collect holds __yices_globals.lock and walks every live
+ * context via context_list_gc_mark -> context_gc_mark, which mutates the
+ * same per-context state: it resets the ctx->top_* / subst_eqs / aux_eqs
+ * vectors, calls intern_tbl_gc_mark / egraph_gc_mark / fun_solver_gc_mark,
+ * and on MCSAT contexts runs the full mcsat_gc(true) (mark + sweep on the
+ * trail and every plugin).
+ *
+ * For MCSAT contexts, mcsat_pop additionally reads __yices_globals.terms
+ * via variable_db_get_term / term_type, racing against term_table_gc.
+ *
+ * Take __yices_globals.lock for the MCSAT branch only; CDCL(T) push/pop
+ * paths are left unlocked, matching the existing pattern in
+ * context_solver.c (call_mcsat_solver and check_context_with_term_assumptions_mcsat
+ * are MT_PROTECT'd; the CDCL(T) solve() body is not).
+ *
+ * Reading ctx->mcsat without the lock is safe: it is set once at context
+ * construction and never mutated afterwards.
+ */
+EXPORTED int32_t yices_push(context_t *ctx) {
+  if (ctx->mcsat != NULL) {
+    MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_push(ctx));
+  }
+  return _o_yices_push(ctx);
+}
+
 
 
 /*
@@ -8620,7 +9153,7 @@ EXPORTED int32_t yices_push(context_t *ctx) {
  *   or if the context's status is SEARCHING or INTERRUPTED
  *   code = CTX_INVALID_OPERATION
  */
-EXPORTED int32_t yices_pop(context_t *ctx) {
+static int32_t _o_yices_pop(context_t *ctx) {
   if (! context_supports_pushpop(ctx)) {
     set_error_code(CTX_OPERATION_NOT_SUPPORTED);
     return -1;
@@ -8662,6 +9195,14 @@ EXPORTED int32_t yices_pop(context_t *ctx) {
   return 0;
 }
 
+/* See the comment above yices_push for the locking rationale. */
+EXPORTED int32_t yices_pop(context_t *ctx) {
+  if (ctx->mcsat != NULL) {
+    MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_pop(ctx));
+  }
+  return _o_yices_pop(ctx);
+}
+
 
 
 /*
@@ -8693,6 +9234,7 @@ static const error_code_t intern_code2error[NUM_INTERNALIZATION_ERRORS] = {
   CTX_BV_SOLVER_EXCEPTION,
   MCSAT_ERROR_UNSUPPORTED_THEORY,
   CTX_HIGH_ORDER_FUN_NOT_SUPPORTED,
+  MCSAT_ERROR_UNSUPPORTED_THEORY,
 };
 
 static inline void convert_internalization_error(int32_t code) {
@@ -9050,7 +9592,11 @@ EXPORTED void yices_default_params_for_context(const context_t *ctx, param_t *pa
   yices_set_default_params(params, ctx->logic, ctx->arch, ctx->mode);
 }
 
-
+/*
+ * Check whether the given delegate is supported and set the error
+ * report if not.
+ */
+static bool check_delegate(const char *delegate);
 
 /*
  * Check satisfiability: check whether the assertions stored in ctx
@@ -9084,6 +9630,10 @@ EXPORTED void yices_default_params_for_context(const context_t *ctx, param_t *pa
  */
 EXPORTED smt_status_t yices_check_context(context_t *ctx, const param_t *params) {
   param_t default_params;
+  sat_delegate_t delegate_mode;
+  sat_delegate_incremental_mode_t exec_mode;
+  bool one_shot_delegate;
+  const char *delegate;
   smt_status_t stat;
 
   stat = context_status(ctx);
@@ -9107,7 +9657,27 @@ EXPORTED smt_status_t yices_check_context(context_t *ctx, const param_t *params)
       yices_default_params_for_context(ctx, &default_params);
       params = &default_params;
     }
-    stat = check_context(ctx, params);
+    delegate_mode = effective_sat_delegate_mode(ctx->sat_delegate, params, &one_shot_delegate);
+    delegate = sat_delegate_name(delegate_mode);
+    if (delegate == NULL) {
+      stat = check_context(ctx, params);
+    } else {
+      if (!check_delegate(delegate)) {
+        return YICES_STATUS_ERROR;
+      }
+      if (ctx->logic != QF_BV) {
+        set_error_code(CTX_OPERATION_NOT_SUPPORTED);
+        return YICES_STATUS_ERROR;
+      }
+      if (!effective_sat_delegate_incremental_mode(delegate_mode, ctx->sat_delegate_incremental_mode,
+                                                  ctx->sat_delegate_incremental_mode_set,
+                                                  ctx->mode == CTX_MODE_ONECHECK,
+                                                  one_shot_delegate, &exec_mode)) {
+        set_error_code(CTX_OPERATION_NOT_SUPPORTED);
+        return YICES_STATUS_ERROR;
+      }
+      stat = check_with_sat_delegate(ctx, delegate, exec_mode, 0, 0, NULL, NULL);
+    }
     if (stat == YICES_STATUS_INTERRUPTED && context_supports_cleaninterrupt(ctx)) {
       context_cleanup(ctx);
     }
@@ -9144,13 +9714,16 @@ static bool _o_unsat_core_check_assumptions(uint32_t n, const term_t a[]) {
  */
 smt_status_t _o_yices_check_context_with_assumptions(context_t *ctx, const param_t *params, uint32_t n, const term_t a[]) {
   param_t default_params;
-  ivector_t assumptions;
   smt_status_t stat;
-  uint32_t i;
-  literal_t l;
+  int32_t error;
 
   if (!_o_unsat_core_check_assumptions(n, a)) {
     return YICES_STATUS_ERROR; // Bad assumptions
+  }
+
+  if (context_has_mcsat(ctx) && !context_supports_model_interpolation(ctx)) {
+    // Enable interpolation on-demand so term assumptions are supported in MCSAT.
+    ctx->mcsat_options.model_interpolation = true;
   }
 
   // cleanup
@@ -9192,21 +9765,6 @@ smt_status_t _o_yices_check_context_with_assumptions(context_t *ctx, const param
 
   assert(context_status(ctx) == YICES_STATUS_IDLE);
 
-  // convert the assumptions to n literals
-  init_ivector(&assumptions, n);
-  for (i=0; i<n; i++) {
-    l = context_add_assumption(ctx, a[i]);
-    if (l < 0) {
-      // error when converting a[i] to a literal
-      convert_internalization_error(l);
-      stat = YICES_STATUS_ERROR;
-      yices_release_mutex();
-      goto cleanup;
-    }
-    ivector_push(&assumptions, l);
-  }
-  assert(assumptions.size == n);
-
   // set parameters
   if (params == NULL) {
     yices_default_params_for_context(ctx, &default_params);
@@ -9214,19 +9772,21 @@ smt_status_t _o_yices_check_context_with_assumptions(context_t *ctx, const param
   }
 
   // call check
-  stat = check_context_with_assumptions(ctx, params, n, assumptions.data);
+  stat = check_context_with_term_assumptions(ctx, params, n, a, &error);
+  if (stat == YICES_STATUS_ERROR && error < 0) {
+    convert_internalization_error(error);
+  } else if (stat == YICES_STATUS_ERROR && error > 0) {
+    set_error_code((error_code_t) error);
+  }
   if (stat == YICES_STATUS_INTERRUPTED && context_supports_cleaninterrupt(ctx)) {
     context_cleanup(ctx);
   }
-
- cleanup:
-  delete_ivector(&assumptions);
 
   return stat;
 }
 
 EXPORTED smt_status_t yices_check_context_with_assumptions(context_t *ctx, const param_t *params, uint32_t n, const term_t a[]) {
-  MT_PROTECT(smt_status_t, __yices_globals.lock, _o_yices_check_context_with_assumptions(ctx, params, n, a));
+  return _o_yices_check_context_with_assumptions(ctx, params, n, a);
 }
 
 /*
@@ -9246,6 +9806,18 @@ static bool good_terms_for_check_with_model(uint32_t n, const term_t t[]) {
 }
 
 /*
+ * Same as _o_good_terms_for_check_with_model, but additionally checks that
+ * the type of each assumption term is one MCSAT can decide on. This guards
+ * against the crash reported in issue #615. Tuple assumptions are allowed
+ * only if every recursively flattened leaf type is supported by an MCSAT
+ * decision plugin.
+ */
+static bool _o_good_assumption_terms_for_mcsat(uint32_t n, const term_t t[]) {
+  return _o_good_terms_for_check_with_model(n, t)
+      && check_mcsat_assumption_types(__yices_globals.manager, n, t);
+}
+
+/*
  * Check context with model
  * - param = parameter for check sat (or NULL for default parameters)
  * - mdl = a model
@@ -9253,7 +9825,7 @@ static bool good_terms_for_check_with_model(uint32_t n, const term_t t[]) {
  *
  * This checks ctx /\ t[0] = val(mdl, t[0]) /\ .... /\ t[n-1] = val(mdl, t[n-1])
  */
-EXPORTED smt_status_t yices_check_context_with_model(context_t *ctx, const param_t *params, model_t* mdl, uint32_t n, const term_t t[]) {
+static smt_status_t _o_yices_check_context_with_model(context_t *ctx, const param_t *params, model_t* mdl, uint32_t n, const term_t t[]) {
   param_t default_params;
   smt_status_t stat;
 
@@ -9262,10 +9834,16 @@ EXPORTED smt_status_t yices_check_context_with_model(context_t *ctx, const param
     return YICES_STATUS_ERROR;
   }
 
-  if (! good_terms_for_check_with_model(n, t)) {
-    // this sets the error code already (to VARIABLE_REQUIRED)
-    // but Dejan created another error code that means the same thing here.
-    set_error_code(MCSAT_ERROR_ASSUMPTION_TERM_NOT_SUPPORTED);
+  if (! _o_good_assumption_terms_for_mcsat(n, t)) {
+    // Normalize the error code: VARIABLE_REQUIRED (set by the
+    // term-shape check) becomes MCSAT_ERROR_ASSUMPTION_TERM_NOT_SUPPORTED,
+    // matching the long-standing convention here. The new
+    // MCSAT_ERROR_ASSUMPTION_TYPE_NOT_SUPPORTED (set by the type-kind
+    // check) is left as-is so callers can distinguish "wrong shape" from
+    // "wrong type". term1/type1 fields are preserved.
+    if (yices_error_code() == VARIABLE_REQUIRED) {
+      set_error_code(MCSAT_ERROR_ASSUMPTION_TERM_NOT_SUPPORTED);
+    }
     return YICES_STATUS_ERROR;
   }
 
@@ -9318,6 +9896,10 @@ EXPORTED smt_status_t yices_check_context_with_model(context_t *ctx, const param
   return stat;
 }
 
+EXPORTED smt_status_t yices_check_context_with_model(context_t *ctx, const param_t *params, model_t* mdl, uint32_t n, const term_t t[]) {
+  MT_PROTECT(smt_status_t, __yices_globals.lock, _o_yices_check_context_with_model(ctx, params, mdl, n, t));
+}
+
 
 /*
  * Check context with model and hint
@@ -9329,7 +9911,7 @@ EXPORTED smt_status_t yices_check_context_with_model(context_t *ctx, const param
  *
  * This checks ctx /\ t[0] = val(mdl, t[0]) /\ .... /\ t[m-1] = val(mdl, t[m-1])
  */
-EXPORTED smt_status_t yices_check_context_with_model_and_hint(context_t *ctx, const param_t *params, model_t* mdl, uint32_t n, const term_t t[], uint32_t m) {
+static smt_status_t _o_yices_check_context_with_model_and_hint(context_t *ctx, const param_t *params, model_t* mdl, uint32_t n, const term_t t[], uint32_t m) {
 
   param_t default_params;
   smt_status_t stat;
@@ -9339,10 +9921,11 @@ EXPORTED smt_status_t yices_check_context_with_model_and_hint(context_t *ctx, co
     return YICES_STATUS_ERROR;
   }
 
-  if (! good_terms_for_check_with_model(n, t)) {
-    // this sets the error code already (to VARIABLE_REQUIRED)
-    // but Dejan created another error code that means the same thing here.
-    set_error_code(MCSAT_ERROR_ASSUMPTION_TERM_NOT_SUPPORTED);
+  if (! _o_good_assumption_terms_for_mcsat(n, t)) {
+    // See note in _o_yices_check_context_with_model.
+    if (yices_error_code() == VARIABLE_REQUIRED) {
+      set_error_code(MCSAT_ERROR_ASSUMPTION_TERM_NOT_SUPPORTED);
+    }
     return YICES_STATUS_ERROR;
   }
 
@@ -9395,6 +9978,10 @@ EXPORTED smt_status_t yices_check_context_with_model_and_hint(context_t *ctx, co
   }
 
   return stat;
+}
+
+EXPORTED smt_status_t yices_check_context_with_model_and_hint(context_t *ctx, const param_t *params, model_t* mdl, uint32_t n, const term_t t[], uint32_t m) {
+  MT_PROTECT(smt_status_t, __yices_globals.lock, _o_yices_check_context_with_model_and_hint(ctx, params, mdl, n, t, m));
 }
 
 /*
@@ -9546,16 +10133,28 @@ EXPORTED smt_status_t yices_check_context_with_interpolation(interpolation_conte
     ctx->model = yices_get_model(ctx->ctx_A, true);
   }
 
-  // Pop both contexts
-  if (result != YICES_STATUS_ERROR) {
+  // Pop both contexts. Preserve the original error report if the loop above
+  // failed (for example, via model-refutation assumption validation).
+  {
+    bool preserve_error = result == YICES_STATUS_ERROR;
+    error_report_t saved_error;
+    if (preserve_error) {
+      saved_error = *get_yices_error();
+    }
+
     ret = yices_pop(ctx->ctx_B);
-    if (ret) {
+    if (ret && !preserve_error) {
       result = YICES_STATUS_ERROR;
-    } else {
-      ret = yices_pop(ctx->ctx_A);
-      if (ret) {
-        result = YICES_STATUS_ERROR;
-      }
+    }
+    // Pop A even if popping B failed: both contexts were pushed above and
+    // must be balanced independently.
+    ret = yices_pop(ctx->ctx_A);
+    if (ret && !preserve_error) {
+      result = YICES_STATUS_ERROR;
+    }
+
+    if (preserve_error) {
+      *get_yices_error() = saved_error;
     }
   }
 
@@ -10033,8 +10632,10 @@ EXPORTED int32_t yices_model_set_bool(model_t* model, term_t var, int32_t val) {
 int32_t _o_yices_model_set_bool(model_t* model, term_t var, int32_t val) {
   if (! check_good_term(__yices_globals.manager, var) ||
       ! check_uninterpreted(__yices_globals.terms, var) ||
-      ! check_boolean_term(__yices_globals.manager, var) ||
-      ! check_unassigned_in_model(model, var)) {
+      ! check_boolean_term(__yices_globals.manager, var)) {
+    return -1;
+  }
+  if (! prepare_model_append(model, var)) {
     return -1;
   }
   model_map_term(model, var, vtbl_mk_bool(&model->vtbl, val));
@@ -10061,8 +10662,10 @@ int32_t _o_yices_model_set_bool(model_t* model, term_t var, int32_t val) {
 static int32_t yices_model_set_q(model_t *model, term_t var, rational_t *q) {
   if (! check_good_term(__yices_globals.manager, var) ||
       ! check_uninterpreted(__yices_globals.terms, var) ||
-      ! check_var_match_rational(__yices_globals.terms, var, q) ||
-      ! check_unassigned_in_model(model, var)) {
+      ! check_var_match_rational(__yices_globals.terms, var, q)) {
+    return -1;
+  }
+  if (! prepare_model_append(model, var)) {
     return -1;
   }
   model_map_term(model, var, vtbl_mk_rational(&model->vtbl, q));
@@ -10134,6 +10737,31 @@ int32_t _o_yices_model_set_mpq(model_t *model, term_t var, mpq_t val) {
   return yices_model_set_q(model, var, &r0);
 }
 
+EXPORTED int32_t yices_model_set_ff_mpz(model_t *model, term_t var, mpz_t val) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_set_ff_mpz(model, var, val));
+}
+
+int32_t _o_yices_model_set_ff_mpz(model_t *model, term_t var, mpz_t val) {
+  term_table_t *tbl;
+  type_t tau;
+
+  if (! check_good_term(__yices_globals.manager, var) ||
+      ! check_uninterpreted(__yices_globals.terms, var) ||
+      ! check_arith_ff_term(__yices_globals.manager, var)) {
+    return -1;
+  }
+
+  tbl = __yices_globals.terms;
+  tau = term_type(tbl, var);
+  q_set_mpz(&r0, val);
+  if (! prepare_model_append(model, var)) {
+    return -1;
+  }
+  model_map_term(model, var, vtbl_mk_finitefield(&model->vtbl, &r0, ff_type_size(tbl->types, tau)));
+
+  return 0;
+}
+
 EXPORTED int32_t yices_model_set_double(model_t *model, term_t var, double val) {
   MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_set_double(model, var, val));
 }
@@ -10162,7 +10790,6 @@ int32_t _o_yices_model_set_term(model_t *model, term_t var, term_t value) {
   type_t tau;
   if (! check_good_term(__yices_globals.manager, var) ||
       ! check_uninterpreted(__yices_globals.terms, var) ||
-      ! check_unassigned_in_model(model, var) ||
       ! check_good_term(__yices_globals.manager, value) ||
       ! is_constant_term(__yices_globals.terms, value)) {
     return -1;
@@ -10175,6 +10802,9 @@ int32_t _o_yices_model_set_term(model_t *model, term_t var, term_t value) {
   init_term_converter(&convert, __yices_globals.terms, &model->vtbl);
   v = convert_term_to_val(&convert, value);
   delete_term_converter(&convert);
+  if (! prepare_model_append(model, var)) {
+    return -1;
+  }
   model_map_term(model, var, v);
   return 0;
 }
@@ -10183,26 +10813,402 @@ EXPORTED int32_t yices_model_set_yval(model_t *model, term_t var, const yval_t *
   MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_set_yval(model, var, yval));
 }
 
+/*
+ * Check that yval refers to a valid object in vtbl and that the tag is consistent.
+ * If valid, store the referenced value in *v.
+ */
+static bool check_model_yval(value_table_t *vtbl, const yval_t *yval, value_t *v) {
+  *v = yval->node_id;
+  if (! good_object(vtbl, *v) ||
+      yval->node_tag != tag_for_valkind(object_kind(vtbl, *v))) {
+    set_error_code(TYPE_MISMATCH);
+    return false;
+  }
+
+  return true;
+}
+
+/*
+ * Check whether value v is compatible with type tau.
+ * - uses the value-table type cache (see vtbl_value_type).
+ */
+static bool check_value_type(value_table_t *vtbl, value_t v, type_t tau) {
+  type_t sigma;
+
+  assert(good_object(vtbl, v));
+  assert(good_type(vtbl->type_table, tau));
+
+  sigma = vtbl_value_type(vtbl, v);
+  if (sigma == NULL_TYPE) {
+    return false;
+  }
+  return is_subtype(vtbl->type_table, sigma, tau);
+}
+
+/*
+ * Division-by-zero function slots
+ */
+typedef void (*zero_div_setter_t)(value_table_t *vtbl, value_t f);
+
+static type_t zero_rdiv_function_type(void) {
+  type_table_t *types;
+  type_t real;
+
+  types = __yices_globals.types;
+  real = real_type(types);
+  return function_type(types, real, 1, &real);
+}
+
+static type_t zero_idiv_function_type(void) {
+  type_table_t *types;
+  type_t integer;
+
+  types = __yices_globals.types;
+  integer = int_type(types);
+  return function_type(types, integer, 1, &integer);
+}
+
+static type_t zero_mod_function_type(void) {
+  return zero_idiv_function_type();
+}
+
+static value_t zero_div_default_function(model_t *mdl, type_t fun_type) {
+  value_table_t *vtbl;
+  value_t zero;
+
+  vtbl = model_get_vtbl(mdl);
+  zero = vtbl_mk_int32(vtbl, 0);
+  return vtbl_mk_constant_function(vtbl, fun_type, zero);
+}
+
+static int32_t yices_model_get_zero_div_function(model_t *mdl, value_t f, type_t fun_type, yval_t *fun) {
+  value_table_t *vtbl;
+
+  vtbl = model_get_vtbl(mdl);
+  if (f == null_value) {
+    f = zero_div_default_function(mdl, fun_type);
+  }
+
+  get_yval(vtbl, f, fun);
+  return 0;
+}
+
+static bool check_zero_div_function_yval(model_t *mdl, const yval_t *fun, type_t expected, value_t *f) {
+  value_table_t *vtbl;
+
+  vtbl = model_get_vtbl(mdl);
+  if (! check_model_yval(vtbl, fun, f)) {
+    return false;
+  }
+
+  if ((! object_is_function(vtbl, *f) && ! object_is_update(vtbl, *f)) ||
+      vtbl_function_type(vtbl, *f) != expected) {
+    set_error_code(TYPE_MISMATCH);
+    return false;
+  }
+
+  return true;
+}
+
+static int32_t yices_model_set_zero_div_function(model_t *mdl, value_t current, type_t expected,
+                                                 const yval_t *fun, zero_div_setter_t set) {
+  value_t f;
+
+  if (current != null_value) {
+    error_report_t *error = get_yices_error();
+    error->code = MDL_DUPLICATE_VAR;
+    error->term1 = NULL_TERM;
+    return -1;
+  }
+
+  if (! check_zero_div_function_yval(mdl, fun, expected, &f)) {
+    return -1;
+  }
+
+  set(model_get_vtbl(mdl), f);
+  return 0;
+}
+
+EXPORTED int32_t yices_model_get_zero_rdiv_function(model_t *mdl, yval_t *fun) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_get_zero_rdiv_function(mdl, fun));
+}
+
+int32_t _o_yices_model_get_zero_rdiv_function(model_t *mdl, yval_t *fun) {
+  return yices_model_get_zero_div_function(mdl, model_get_vtbl(mdl)->zero_rdiv_fun,
+                                           zero_rdiv_function_type(), fun);
+}
+
+EXPORTED int32_t yices_model_get_zero_idiv_function(model_t *mdl, yval_t *fun) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_get_zero_idiv_function(mdl, fun));
+}
+
+int32_t _o_yices_model_get_zero_idiv_function(model_t *mdl, yval_t *fun) {
+  return yices_model_get_zero_div_function(mdl, model_get_vtbl(mdl)->zero_idiv_fun,
+                                           zero_idiv_function_type(), fun);
+}
+
+EXPORTED int32_t yices_model_get_zero_mod_function(model_t *mdl, yval_t *fun) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_get_zero_mod_function(mdl, fun));
+}
+
+int32_t _o_yices_model_get_zero_mod_function(model_t *mdl, yval_t *fun) {
+  return yices_model_get_zero_div_function(mdl, model_get_vtbl(mdl)->zero_mod_fun,
+                                           zero_mod_function_type(), fun);
+}
+
+EXPORTED int32_t yices_model_set_zero_rdiv_function(model_t *mdl, const yval_t *fun) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_set_zero_rdiv_function(mdl, fun));
+}
+
+int32_t _o_yices_model_set_zero_rdiv_function(model_t *mdl, const yval_t *fun) {
+  return yices_model_set_zero_div_function(mdl, model_get_vtbl(mdl)->zero_rdiv_fun,
+                                           zero_rdiv_function_type(), fun, vtbl_set_zero_rdiv);
+}
+
+EXPORTED int32_t yices_model_set_zero_idiv_function(model_t *mdl, const yval_t *fun) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_set_zero_idiv_function(mdl, fun));
+}
+
+int32_t _o_yices_model_set_zero_idiv_function(model_t *mdl, const yval_t *fun) {
+  return yices_model_set_zero_div_function(mdl, model_get_vtbl(mdl)->zero_idiv_fun,
+                                           zero_idiv_function_type(), fun, vtbl_set_zero_idiv);
+}
+
+EXPORTED int32_t yices_model_set_zero_mod_function(model_t *mdl, const yval_t *fun) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_set_zero_mod_function(mdl, fun));
+}
+
+int32_t _o_yices_model_set_zero_mod_function(model_t *mdl, const yval_t *fun) {
+  return yices_model_set_zero_div_function(mdl, model_get_vtbl(mdl)->zero_mod_fun,
+                                           zero_mod_function_type(), fun, vtbl_set_zero_mod);
+}
+
+EXPORTED int32_t yices_model_export_value(model_t *src, model_t *dst, const yval_t *src_val, yval_t *dst_val) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_export_value(src, dst, src_val, dst_val));
+}
+
+int32_t _o_yices_model_export_value(model_t *src, model_t *dst, const yval_t *src_val, yval_t *dst_val) {
+  value_table_t *src_vtbl, *dst_vtbl;
+  vtbl_copy_t copy;
+  value_t v, dst_v;
+
+  src_vtbl = model_get_vtbl(src);
+  if (! check_model_yval(src_vtbl, src_val, &v)) {
+    return -1;
+  }
+
+  dst_vtbl = model_get_vtbl(dst);
+  init_vtbl_copy(&copy, src_vtbl, dst_vtbl);
+  dst_v = vtbl_copy_value(&copy, v);
+  delete_vtbl_copy(&copy);
+
+  get_yval(dst_vtbl, dst_v, dst_val);
+  return 0;
+}
+
 int32_t _o_yices_model_set_yval(model_t *model, term_t var, const yval_t *yval) {
   value_table_t *vtbl;
   value_t v;
+  type_t tau;
   
   if (! check_good_term(__yices_globals.manager, var) ||
-      ! check_uninterpreted(__yices_globals.terms, var) ||
-      ! check_unassigned_in_model(model, var)) {
+      ! check_uninterpreted(__yices_globals.terms, var)) {
     return -1;
   }
 
   vtbl = model_get_vtbl(model);
-  v = yval->node_id;
-  
-  // Check that the yval is a valid object
-  if (! good_object(vtbl, v)) {
+  if (! check_model_yval(vtbl, yval, &v)) {
+    return -1;
+  }
+
+  tau = term_type(__yices_globals.terms, var);
+  if (! check_value_type(vtbl, v, tau)) {
     set_error_code(TYPE_MISMATCH);
     return -1;
   }
 
+  if (! prepare_model_append(model, var)) {
+    return -1;
+  }
   model_map_term(model, var, v);
+  return 0;
+}
+
+EXPORTED int32_t yices_model_make_tuple(model_t *model, uint32_t n, const yval_t elem[], yval_t *tuple) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_make_tuple(model, n, elem, tuple));
+}
+
+int32_t _o_yices_model_make_tuple(model_t *model, uint32_t n, const yval_t elem[], yval_t *tuple) {
+  value_table_t *vtbl;
+  value_t v;
+  value_t *a;
+  uint32_t i;
+
+  vtbl = model_get_vtbl(model);
+  a = (value_t *) safe_malloc(n * sizeof(value_t));
+
+  for (i = 0; i < n; i++) {
+    if (! check_model_yval(vtbl, elem + i, a + i)) {
+      safe_free(a);
+      return -1;
+    }
+  }
+
+  v = vtbl_mk_tuple(vtbl, n, a);
+  safe_free(a);
+  get_yval(vtbl, v, tuple);
+
+  return 0;
+}
+
+EXPORTED int32_t yices_model_set_tuple(model_t *model, term_t var, uint32_t n, const yval_t elem[]) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_set_tuple(model, var, n, elem));
+}
+
+int32_t _o_yices_model_set_tuple(model_t *model, term_t var, uint32_t n, const yval_t elem[]) {
+  yval_t tuple;
+
+  if (_o_yices_model_make_tuple(model, n, elem, &tuple) < 0) {
+    return -1;
+  }
+
+  return _o_yices_model_set_yval(model, var, &tuple);
+}
+
+EXPORTED int32_t yices_model_make_mapping(model_t *model, uint32_t arity, const yval_t args[], const yval_t *value, yval_t *mapping) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_make_mapping(model, arity, args, value, mapping));
+}
+
+int32_t _o_yices_model_make_mapping(model_t *model, uint32_t arity, const yval_t args[], const yval_t *value, yval_t *mapping) {
+  value_table_t *vtbl;
+  value_t v;
+  value_t *a;
+  uint32_t i;
+
+  vtbl = model_get_vtbl(model);
+  a = (value_t *) safe_malloc(arity * sizeof(value_t));
+
+  for (i = 0; i < arity; i++) {
+    if (! check_model_yval(vtbl, args + i, a + i)) {
+      safe_free(a);
+      return -1;
+    }
+  }
+
+  if (! check_model_yval(vtbl, value, &v)) {
+    safe_free(a);
+    return -1;
+  }
+
+  v = vtbl_mk_map(vtbl, arity, a, v);
+  safe_free(a);
+  get_yval(vtbl, v, mapping);
+
+  return 0;
+}
+
+EXPORTED int32_t yices_model_make_function(model_t *model, type_t fun_type, uint32_t n, const yval_t mappings[], const yval_t *def, yval_t *fun) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_make_function(model, fun_type, n, mappings, def, fun));
+}
+
+int32_t _o_yices_model_make_function(model_t *model, type_t fun_type, uint32_t n, const yval_t mappings[], const yval_t *def, yval_t *fun) {
+  type_table_t *types;
+  value_table_t *vtbl;
+  value_t *a;
+  value_t def_v;
+  value_t f;
+  value_map_t *m;
+  type_t range;
+  uint32_t i, j, arity;
+
+  if (! check_good_type(__yices_globals.types, fun_type) ||
+      ! is_function_type(__yices_globals.types, fun_type)) {
+    set_error_code(TYPE_MISMATCH);
+    return -1;
+  }
+
+  types = __yices_globals.types;
+  vtbl = model_get_vtbl(model);
+  arity = function_type_arity(types, fun_type);
+  range = function_type_range(types, fun_type);
+
+  if (! check_model_yval(vtbl, def, &def_v)) {
+    return -1;
+  }
+
+  if (! check_value_type(vtbl, def_v, range)) {
+    set_error_code(TYPE_MISMATCH);
+    return -1;
+  }
+
+  a = (value_t *) safe_malloc(n * sizeof(value_t));
+  for (i = 0; i < n; i++) {
+    if (! check_model_yval(vtbl, mappings + i, a + i)) {
+      safe_free(a);
+      return -1;
+    }
+    if (! object_is_map(vtbl, a[i])) {
+      safe_free(a);
+      set_error_code(TYPE_MISMATCH);
+      return -1;
+    }
+
+    m = vtbl_map(vtbl, a[i]);
+    if (m->arity != arity) {
+      safe_free(a);
+      set_error_code(TYPE_MISMATCH);
+      return -1;
+    }
+
+    for (j = 0; j < arity; j++) {
+      if (! check_value_type(vtbl, m->arg[j], function_type_domain(types, fun_type, (int32_t) j))) {
+        safe_free(a);
+        set_error_code(TYPE_MISMATCH);
+        return -1;
+      }
+    }
+
+    if (! check_value_type(vtbl, m->val, range)) {
+      safe_free(a);
+      set_error_code(TYPE_MISMATCH);
+      return -1;
+    }
+  }
+
+  f = vtbl_mk_function(vtbl, fun_type, n, a, def_v);
+  safe_free(a);
+  get_yval(vtbl, f, fun);
+
+  return 0;
+}
+
+EXPORTED int32_t yices_model_set_function(model_t *model, term_t var, uint32_t n, const yval_t mappings[], const yval_t *def) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_model_set_function(model, var, n, mappings, def));
+}
+
+int32_t _o_yices_model_set_function(model_t *model, term_t var, uint32_t n, const yval_t mappings[], const yval_t *def) {
+  yval_t fun;
+  type_t tau;
+
+  if (! check_good_term(__yices_globals.manager, var) ||
+      ! check_uninterpreted(__yices_globals.terms, var)) {
+    return -1;
+  }
+
+  tau = term_type(__yices_globals.terms, var);
+  if (! is_function_type(__yices_globals.types, tau)) {
+    set_error_code(TYPE_MISMATCH);
+    return -1;
+  }
+
+  if (_o_yices_model_make_function(model, tau, n, mappings, def, &fun) < 0) {
+    return -1;
+  }
+
+  if (! prepare_model_append(model, var)) {
+    return -1;
+  }
+  model_map_term(model, var, fun.node_id);
   return 0;
 }
 
@@ -10215,12 +11221,14 @@ int32_t _o_yices_model_set_algebraic_number(model_t *model, term_t var, const lp
 
   if (! check_good_term(__yices_globals.manager, var) ||
       ! check_uninterpreted(__yices_globals.terms, var) ||
-      ! check_real_term(__yices_globals.manager, var) ||
-      ! check_unassigned_in_model(model, var)) {
+      ! check_real_term(__yices_globals.manager, var)) {
     return -1;
   }
 
   a_val = vtbl_mk_algebraic(&model->vtbl, (void*) val);
+  if (! prepare_model_append(model, var)) {
+    return -1;
+  }
   model_map_term(model, var, a_val);
 
   return 0;
@@ -10240,17 +11248,20 @@ int32_t _o_yices_model_set_algebraic_number(model_t *model, term_t var, const lp
 static uint32_t check_var_and_get_bitsize(model_t *model, term_t var) {
   if (! check_good_term(__yices_globals.manager, var) ||
       ! check_uninterpreted(__yices_globals.terms, var) ||
-      ! check_bitvector_term(__yices_globals.manager, var) ||
-      ! check_unassigned_in_model(model, var)) {
+      ! check_bitvector_term(__yices_globals.manager, var)) {
     return 0;
   }
 
   return term_bitsize(__yices_globals.terms, var);
 }
 
-static inline void yices_model_set_bvconstant(model_t *model, term_t var, bvconstant_t *b) {
+static inline int32_t yices_model_set_bvconstant(model_t *model, term_t var, bvconstant_t *b) {
   assert(term_bitsize(__yices_globals.terms, var) == b->bitsize);
+  if (! prepare_model_append(model, var)) {
+    return -1;
+  }
   model_map_term(model, var, vtbl_mk_bv_from_constant(&model->vtbl, b));
+  return 0;
 }
 
 EXPORTED int32_t yices_model_set_bv_int32(model_t *model, term_t var, int32_t val) {
@@ -10265,8 +11276,7 @@ int32_t _o_yices_model_set_bv_int32(model_t *model, term_t var, int32_t val) {
 
   bvconstant_set_bitsize(&bv0, n);
   bvconst_set32_signed(bv0.data, bv0.width, val);
-  yices_model_set_bvconstant(model, var, &bv0);
-  return 0;
+  return yices_model_set_bvconstant(model, var, &bv0);
 }
 
 
@@ -10282,8 +11292,7 @@ int32_t _o_yices_model_set_bv_int64(model_t *model, term_t var, int64_t val) {
 
   bvconstant_set_bitsize(&bv0, n);
   bvconst_set64_signed(bv0.data, bv0.width, val);
-  yices_model_set_bvconstant(model, var, &bv0);
-  return 0;
+  return yices_model_set_bvconstant(model, var, &bv0);
 }
 
 
@@ -10299,8 +11308,7 @@ int32_t _o_yices_model_set_bv_uint32(model_t *model, term_t var, uint32_t val) {
 
   bvconstant_set_bitsize(&bv0, n);
   bvconst_set32(bv0.data, bv0.width, val);
-  yices_model_set_bvconstant(model, var, &bv0);
-  return 0;
+  return yices_model_set_bvconstant(model, var, &bv0);
 }
 
 
@@ -10316,8 +11324,7 @@ int32_t _o_yices_model_set_bv_uint64(model_t *model, term_t var, uint64_t val) {
 
   bvconstant_set_bitsize(&bv0, n);
   bvconst_set64(bv0.data, bv0.width, val);
-  yices_model_set_bvconstant(model, var, &bv0);
-  return 0;
+  return yices_model_set_bvconstant(model, var, &bv0);
 }
 
 EXPORTED int32_t yices_model_set_bv_mpz(model_t *model, term_t var, mpz_t val) {
@@ -10347,9 +11354,7 @@ int32_t _o_yices_model_set_bv_mpz(model_t *model, term_t var, mpz_t val) {
     mpz_clear(aux);
   }
 
-  yices_model_set_bvconstant(model, var, &bv0);
-
-  return 0;
+  return yices_model_set_bvconstant(model, var, &bv0);
 }
 
 
@@ -10384,9 +11389,7 @@ int32_t _o_yices_model_set_bv_from_array(model_t *model, term_t var, uint32_t n,
 
   bvconstant_set_bitsize(&bv0, n);
   bvconst_set_array(bv0.data, a, n);
-  yices_model_set_bvconstant(model, var, &bv0);
-
-  return 0;
+  return yices_model_set_bvconstant(model, var, &bv0);
 }
 
 
@@ -10418,8 +11421,7 @@ int32_t _o_yices_model_set_scalar(model_t *model, term_t var, int32_t val) {
   type_t tau;
 
   if (! check_good_term(__yices_globals.manager, var) ||
-      ! check_uninterpreted(__yices_globals.terms, var) ||
-      ! check_unassigned_in_model(model, var)) {
+      ! check_uninterpreted(__yices_globals.terms, var)) {
     return -1;
   }
 
@@ -10428,6 +11430,9 @@ int32_t _o_yices_model_set_scalar(model_t *model, term_t var, int32_t val) {
     return -1;
   }
 
+  if (! prepare_model_append(model, var)) {
+    return -1;
+  }
   model_map_term(model, var, vtbl_mk_const(&model->vtbl, tau, val, NULL));
 
   return 0;
@@ -10990,6 +11995,140 @@ static inline error_code_t yices_eval_error(int32_t v) {
   return eval_error2code[-v];
 }
 
+/*
+ * Clone/project models
+ */
+static void clone_model_map(model_t *dst, model_t *src, vtbl_copy_t *copy) {
+  int_hmap_pair_t *r;
+  value_t v;
+
+  r = int_hmap_first_record(&src->map);
+  while (r != NULL) {
+    v = vtbl_copy_value(copy, r->val);
+    model_map_term(dst, r->key, v);
+    r = int_hmap_next_record(&src->map, r);
+  }
+}
+
+static void clone_model_alias_map(model_t *dst, model_t *src) {
+  int_hmap_pair_t *r;
+
+  if (src->alias_map != NULL) {
+    assert(src->has_alias && dst->has_alias);
+
+    r = int_hmap_first_record(src->alias_map);
+    while (r != NULL) {
+      model_add_substitution(dst, r->key, r->val);
+      r = int_hmap_next_record(src->alias_map, r);
+    }
+  }
+}
+
+static void clone_model_zero_division_slots(model_t *dst, model_t *src, vtbl_copy_t *copy) {
+  value_table_t *src_vtbl, *dst_vtbl;
+
+  src_vtbl = model_get_vtbl(src);
+  dst_vtbl = model_get_vtbl(dst);
+
+  if (src_vtbl->zero_rdiv_fun != null_value) {
+    vtbl_set_zero_rdiv(dst_vtbl, vtbl_copy_value(copy, src_vtbl->zero_rdiv_fun));
+  }
+  if (src_vtbl->zero_idiv_fun != null_value) {
+    vtbl_set_zero_idiv(dst_vtbl, vtbl_copy_value(copy, src_vtbl->zero_idiv_fun));
+  }
+  if (src_vtbl->zero_mod_fun != null_value) {
+    vtbl_set_zero_mod(dst_vtbl, vtbl_copy_value(copy, src_vtbl->zero_mod_fun));
+  }
+}
+
+static model_t *clone_model_structure(model_t *src) {
+  model_t *dst;
+  vtbl_copy_t copy;
+
+  dst = yices_new_model_internal(src->has_alias);
+  init_vtbl_copy(&copy, model_get_vtbl(src), model_get_vtbl(dst));
+  clone_model_map(dst, src, &copy);
+  clone_model_alias_map(dst, src);
+  clone_model_zero_division_slots(dst, src, &copy);
+  delete_vtbl_copy(&copy);
+
+  return dst;
+}
+
+EXPORTED model_t *yices_model_clone(model_t *src) {
+  MT_PROTECT(model_t *, __yices_globals.lock, _o_yices_model_clone(src));
+}
+
+model_t *_o_yices_model_clone(model_t *src) {
+  return clone_model_structure(src);
+}
+
+static bool check_project_domain(uint32_t n, const term_t domain[]) {
+  error_report_t *error;
+  uint32_t i;
+
+  if (domain == NULL) {
+    if (n == 0) {
+      return true;
+    }
+    error = get_yices_error();
+    error->code = INVALID_TERM;
+    error->term1 = NULL_TERM;
+    return false;
+  }
+
+  for (i=0; i<n; i++) {
+    if (! check_good_term(__yices_globals.manager, domain[i]) ||
+        ! check_uninterpreted(__yices_globals.terms, domain[i])) {
+      return false;
+    }
+  }
+
+  return check_all_distinct(__yices_globals.terms, n, domain);
+}
+
+EXPORTED model_t *yices_model_project(model_t *src, uint32_t n, const term_t domain[]) {
+  MT_PROTECT(model_t *, __yices_globals.lock, _o_yices_model_project(src, n, domain));
+}
+
+model_t *_o_yices_model_project(model_t *src, uint32_t n, const term_t domain[]) {
+  model_t *eval_src, *dst;
+  vtbl_copy_t copy;
+  value_t v, dst_v;
+  uint32_t i;
+
+  if (! check_project_domain(n, domain)) {
+    return NULL;
+  }
+
+  dst = yices_new_model_internal(false);
+  if (n == 0) {
+    return dst;
+  }
+
+  eval_src = clone_model_structure(src);
+  init_vtbl_copy(&copy, model_get_vtbl(eval_src), model_get_vtbl(dst));
+
+  for (i=0; i<n; i++) {
+    v = model_get_term_value(eval_src, domain[i]);
+    if (v < 0) {
+      set_error_code(yices_eval_error(v));
+      delete_vtbl_copy(&copy);
+      _o_yices_free_model(eval_src);
+      _o_yices_free_model(dst);
+      return NULL;
+    }
+
+    dst_v = vtbl_copy_value(&copy, v);
+    model_map_term(dst, domain[i], dst_v);
+  }
+
+  delete_vtbl_copy(&copy);
+  _o_yices_free_model(eval_src);
+
+  return dst;
+}
+
 
 /*
  * Value of boolean term t: returned as an integer val
@@ -11262,6 +12401,39 @@ int32_t _o_yices_get_mpq_value(model_t *mdl, term_t t, mpq_t val) {
   }
 
   q_get_mpq(aux.val.q, val);
+
+  return 0;
+}
+
+EXPORTED int32_t yices_get_ff_value(model_t *mdl, term_t t, mpz_t val, mpz_t mod) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_get_ff_value(mdl, t, val, mod));
+}
+
+int32_t _o_yices_get_ff_value(model_t *mdl, term_t t, mpz_t val, mpz_t mod) {
+  value_table_t *vtbl;
+  value_ff_t *v_ff;
+  value_t v;
+
+  if (! check_good_term(__yices_globals.manager, t) ||
+      ! check_arith_ff_term(__yices_globals.manager, t)) {
+    return -1;
+  }
+
+  v = model_get_term_value(mdl, t);
+  if (v < 0) {
+    set_error_code(yices_eval_error(v));
+    return -1;
+  }
+
+  vtbl = model_get_vtbl(mdl);
+  if (! object_is_finitefield(vtbl, v)) {
+    set_error_code(INTERNAL_EXCEPTION);
+    return -1;
+  }
+
+  v_ff = vtbl_finitefield(vtbl, v);
+  q_get_mpz(&v_ff->value, val);
+  q_get_mpz(&v_ff->mod, mod);
 
   return 0;
 }
@@ -11869,6 +13041,31 @@ int32_t _o_yices_val_get_mpq(model_t *mdl, const yval_t *v, mpq_t val) {
   return 0;
 }
 
+EXPORTED int32_t yices_val_get_ff(model_t *mdl, const yval_t *v, mpz_t val, mpz_t mod) {
+  MT_PROTECT(int32_t, __yices_globals.lock, _o_yices_val_get_ff(mdl, v, val, mod));
+}
+
+int32_t _o_yices_val_get_ff(model_t *mdl, const yval_t *v, mpz_t val, mpz_t mod) {
+  value_table_t *vtbl;
+  value_ff_t *v_ff;
+  value_t id;
+
+  if (v->node_tag == YVAL_FINITEFIELD) {
+    vtbl = model_get_vtbl(mdl);
+    id = v->node_id;
+    if (good_object(vtbl, id) && object_is_finitefield(vtbl, id)) {
+      v_ff = vtbl_finitefield(vtbl, id);
+      q_get_mpz(&v_ff->value, val);
+      q_get_mpz(&v_ff->mod, mod);
+      return 0;
+    }
+  } else {
+    set_error_code(YVAL_INVALID_OP);
+  }
+
+  return -1;
+}
+
 
 // Conversion to double
 EXPORTED int32_t yices_val_get_double(model_t *mdl, const yval_t *v, double *val) {
@@ -12342,6 +13539,62 @@ static void report_gen_error(int32_t code, int32_t bad_term_kind) {
   }
 }
 
+/*
+ * Enumerate implicant cubes for t in mdl.
+ */
+EXPORTED int32_t yices_implicant_cubes_for_formula(model_t *mdl, term_t t,
+                                                   uint32_t max_cubes, term_vector_t *v) {
+  MT_PROTECT(int32_t,  __yices_globals.lock, _o_yices_implicant_cubes_for_formula(mdl, t, max_cubes, v));
+}
+
+int32_t _o_yices_implicant_cubes_for_formula(model_t *mdl, term_t t,
+                                             uint32_t max_cubes, term_vector_t *v) {
+  int32_t code;
+
+  v->size = 0;
+  if (! check_good_term(__yices_globals.manager, t) ||
+      ! check_boolean_term(__yices_globals.manager, t)) {
+    return -1;
+  }
+
+  code = get_implicant_cubes(mdl, __yices_globals.manager, 1, &t, max_cubes, (ivector_t *) v);
+  if (code < 0) {
+    report_gen_error(code, 0);
+    v->size = 0;
+    return -1;
+  }
+
+  return code;
+}
+
+/*
+ * Same thing for an array of formulas a[0 ... n-1].
+ */
+EXPORTED int32_t yices_implicant_cubes_for_formulas(model_t *mdl, uint32_t n, const term_t a[],
+                                                    uint32_t max_cubes, term_vector_t *v) {
+  MT_PROTECT(int32_t,  __yices_globals.lock, _o_yices_implicant_cubes_for_formulas(mdl, n, a, max_cubes, v));
+}
+
+int32_t _o_yices_implicant_cubes_for_formulas(model_t *mdl, uint32_t n, const term_t a[],
+                                              uint32_t max_cubes, term_vector_t *v) {
+  int32_t code;
+
+  v->size = 0;
+  if (! check_good_terms(__yices_globals.manager, n, a) ||
+      ! check_boolean_args(__yices_globals.manager, n, a)) {
+    return -1;
+  }
+
+  code = get_implicant_cubes(mdl, __yices_globals.manager, n, a, max_cubes, (ivector_t *) v);
+  if (code < 0) {
+    report_gen_error(code, 0);
+    v->size = 0;
+    return -1;
+  }
+
+  return code;
+}
+
 
 /*
  * Given a model mdl for a formula F(X, Y). The following generalization functions
@@ -12357,11 +13610,20 @@ static void report_gen_error(int32_t code, int32_t bad_term_kind) {
  */
 EXPORTED int32_t yices_generalize_model(model_t *mdl, term_t t, uint32_t nelims, const term_t elim[],
 					yices_gen_mode_t mode, term_vector_t *v) {
-  MT_PROTECT(int32_t,  __yices_globals.lock, _o_yices_generalize_model(mdl, t, nelims, elim, mode, v));
+  MT_PROTECT(int32_t,  __yices_globals.lock,
+	     _o_yices_generalize_model_with_budget(mdl, t, nelims, elim, mode, 0, v));
 }
 
-int32_t _o_yices_generalize_model(model_t *mdl, term_t t, uint32_t nelims, const term_t elim[],
-				  yices_gen_mode_t mode, term_vector_t *v) {
+EXPORTED int32_t yices_generalize_model_with_budget(model_t *mdl, term_t t, uint32_t nelims, const term_t elim[],
+						    yices_gen_mode_t mode, uint32_t cube_budget,
+						    term_vector_t *v) {
+  MT_PROTECT(int32_t,  __yices_globals.lock,
+	     _o_yices_generalize_model_with_budget(mdl, t, nelims, elim, mode, cube_budget, v));
+}
+
+int32_t _o_yices_generalize_model_with_budget(model_t *mdl, term_t t, uint32_t nelims, const term_t elim[],
+					      yices_gen_mode_t mode, uint32_t cube_budget,
+					      term_vector_t *v) {
   int32_t code;
   int32_t extra_error;
 
@@ -12379,7 +13641,11 @@ int32_t _o_yices_generalize_model(model_t *mdl, term_t t, uint32_t nelims, const
     break;
 
   case YICES_GEN_BY_PROJ:
-    code = gen_model_by_projection(mdl, __yices_globals.manager, 1, &t, nelims, elim, (ivector_t *) v, &extra_error);
+    code = gen_model_by_projection_local(mdl, __yices_globals.manager, 1, &t, nelims, elim, (ivector_t *) v, &extra_error);
+    break;
+
+  case YICES_GEN_BY_PROJ_WIDE:
+    code = gen_model_by_projection(mdl, __yices_globals.manager, 1, &t, nelims, elim, (ivector_t *) v, cube_budget, &extra_error);
     break;
 
   default:
@@ -12399,20 +13665,29 @@ int32_t _o_yices_generalize_model(model_t *mdl, term_t t, uint32_t nelims, const
 /*
  * Same thing for a conjunction of formulas a[0 ... n-1]
  */
-EXPORTED term_t yices_generalize_model_array(model_t *mdl, uint32_t n, const term_t a[], uint32_t nelims, const term_t elim[],
-					     yices_gen_mode_t mode, term_vector_t *v) {
-  MT_PROTECT(term_t,  __yices_globals.lock, _o_yices_generalize_model_array(mdl, n, a, nelims, elim, mode, v));
+EXPORTED int32_t yices_generalize_model_array(model_t *mdl, uint32_t n, const term_t a[], uint32_t nelims, const term_t elim[],
+					      yices_gen_mode_t mode, term_vector_t *v) {
+  MT_PROTECT(int32_t,  __yices_globals.lock,
+	     _o_yices_generalize_model_array_with_budget(mdl, n, a, nelims, elim, mode, 0, v));
 }
 
-term_t _o_yices_generalize_model_array(model_t *mdl, uint32_t n, const term_t a[], uint32_t nelims, const term_t elim[],
-					     yices_gen_mode_t mode, term_vector_t *v) {
+EXPORTED int32_t yices_generalize_model_array_with_budget(model_t *mdl, uint32_t n, const term_t a[], uint32_t nelims,
+							  const term_t elim[], yices_gen_mode_t mode,
+							  uint32_t cube_budget, term_vector_t *v) {
+  MT_PROTECT(int32_t,  __yices_globals.lock,
+	     _o_yices_generalize_model_array_with_budget(mdl, n, a, nelims, elim, mode, cube_budget, v));
+}
+
+int32_t _o_yices_generalize_model_array_with_budget(model_t *mdl, uint32_t n, const term_t a[], uint32_t nelims,
+						    const term_t elim[], yices_gen_mode_t mode,
+						    uint32_t cube_budget, term_vector_t *v) {
   int32_t code;
   int32_t extra_error;
 
   if (! check_good_terms(__yices_globals.manager, n, a) ||
       ! check_boolean_args(__yices_globals.manager, n, a) ||
       ! check_elim_vars(__yices_globals.manager, nelims, elim)) {
-    return NULL_TERM;
+    return -1;
   }
 
   extra_error = 0;
@@ -12423,7 +13698,11 @@ term_t _o_yices_generalize_model_array(model_t *mdl, uint32_t n, const term_t a[
     break;
 
   case YICES_GEN_BY_PROJ:
-    code = gen_model_by_projection(mdl, __yices_globals.manager, n, a, nelims, elim, (ivector_t *) v, &extra_error);
+    code = gen_model_by_projection_local(mdl, __yices_globals.manager, n, a, nelims, elim, (ivector_t *) v, &extra_error);
+    break;
+
+  case YICES_GEN_BY_PROJ_WIDE:
+    code = gen_model_by_projection(mdl, __yices_globals.manager, n, a, nelims, elim, (ivector_t *) v, cube_budget, &extra_error);
     break;
 
   default:

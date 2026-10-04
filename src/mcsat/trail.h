@@ -23,7 +23,6 @@
 #include "mcsat/model.h"
 #include "mcsat/mcsat_types.h"
 #include "mcsat/gc.h"
-#include "mcsat/nta_info.h"
 
 typedef enum {
   /** A decided value */
@@ -46,9 +45,6 @@ struct mcsat_trail_s {
 
   /** The variable database */
   const variable_db_t* var_db;
-
-  /** NTA info (for delta mode tracking) */
-  const nta_info_t* nta_info;
 
   /** Trail elements */
   ivector_t elements;
@@ -226,6 +222,29 @@ const mcsat_value_t* trail_get_cached_value(const mcsat_trail_t* trail, variable
   }
 }
 
+/*
+ * Collect the cached decision-value hints for an unassigned variable, in priority
+ * order, into out[]. Returns the number of distinct hints (0, 1, or 2): the
+ * higher-priority tier-1 value (target cache) first, then the tier-2 value (model
+ * cache) when it is present and not identical to the tier-1 value. Each value is
+ * only a hint: the caller must still check it against the variable's feasible set
+ * before deciding on it.
+ */
+static inline
+uint32_t trail_get_cached_candidates(const mcsat_trail_t* trail, variable_t var, const mcsat_value_t* out[2]) {
+  assert(!trail_has_value(trail, var));
+  uint32_t n = 0;
+  const mcsat_value_t* tier1 = mcsat_model_get_value(&trail->target_cache, var);
+  const mcsat_value_t* tier2 = mcsat_model_get_value(&trail->model, var);
+  if (tier1->type != VALUE_NONE) {
+    out[n++] = tier1;
+  }
+  if (tier2->type != VALUE_NONE && (n == 0 || !mcsat_value_eq(tier2, out[0]))) {
+    out[n++] = tier2;
+  }
+  return n;
+}
+
 /** Get the value timestamp of the variable */
 static inline
 uint32_t trail_get_value_timestamp(const mcsat_trail_t* trail, variable_t var) {
@@ -300,8 +319,8 @@ void trail_recache(mcsat_trail_t* trail, uint32_t round);
 /** save target/best cache */
 void trail_update_extra_cache(mcsat_trail_t* trail);
 
-/** clear target/best cache */
-void trail_clear_extra_cache(mcsat_trail_t* trail);
+/** clear target/best cache; if keep_best is true, only the target cache is cleared */
+void trail_clear_extra_cache(mcsat_trail_t* trail, bool keep_best);
 
 /** clear all caches */
 void trail_clear_cache(mcsat_trail_t* trail);

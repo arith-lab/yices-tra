@@ -160,6 +160,25 @@ static inline void multiply_activity(clause_t *cl, float scale) {
 }
 
 /*
+ * Reduce-protection counter (CaDiCaL-style "used recently" flag).
+ * - set to CLAUSE_USED_INIT when cl is resolved in conflict analysis
+ * - decremented on each reduce; cl is protected from deletion while > 0
+ */
+#define CLAUSE_USED_INIT 1
+
+static inline uint32_t get_used(const clause_t *cl) {
+  return learned(cl)->used;
+}
+
+static inline void set_used(clause_t *cl) {
+  learned(cl)->used = CLAUSE_USED_INIT;
+}
+
+static inline void dec_used(clause_t *cl) {
+  learned(cl)->used --;
+}
+
+/*
  * Mark a clause cl for removal
  */
 static inline void mark_for_removal(clause_t *cl) {
@@ -238,6 +257,7 @@ static clause_t *new_learned_clause(uint32_t len, literal_t *lit) {
   tmp = (learned_clause_t *) safe_malloc(sizeof(learned_clause_t) + sizeof(literal_t) +
                                          len * sizeof(literal_t));
   tmp->activity = 0.0;
+  tmp->used = 0; // unprotected until re-resolved in a later conflict
   result = &(tmp->clause);
 
   for (i=0; i<len; i++) {
@@ -2891,11 +2911,8 @@ static void direct_binary_clause(smt_core_t *s, literal_t l1, literal_t l2) {
   add_literal_to_vector(s->bin + l2, l1);
   s->nb_bin_clauses ++;
 
-  if (s->base_level > 0) {
-    // make a copy for push/pop
-    ivector_push(&s->binary_clauses, l1);
-    ivector_push(&s->binary_clauses, l2);
-  }
+  ivector_push(&s->binary_clauses, l1);
+  ivector_push(&s->binary_clauses, l2);
 }
 
 
@@ -3541,6 +3558,7 @@ static void resolve_conflict(smt_core_t *s) {
    */
   if (l == end_learned) {
     increase_clause_activity(s, s->false_clause);
+    set_used(s->false_clause); // existing learned clause reused in conflict analysis
   }
 
   assert(unresolved > 0);
@@ -3590,6 +3608,7 @@ static void resolve_conflict(smt_core_t *s) {
           }
           if (l == end_learned) {
             increase_clause_activity(s, cl);
+            set_used(cl); // existing learned clause reused in conflict analysis
           }
           break;
 
@@ -4800,13 +4819,19 @@ void reduce_clause_database(smt_core_t *s) {
 
   // prepare for deletion: all non-locked clauses, with activity less
   // than activity_threshold are marked for deletion.
+  // Clauses used since the last reduce are protected (their counter is
+  // decremented so the protection decays if they stay idle).
   for (i=0; i<n/2; i++) {
-    if (get_activity(v[i]) <= act_threshold && ! clause_is_locked(s, v[i])) {
+    if (get_used(v[i]) > 0) {
+      dec_used(v[i]);
+    } else if (get_activity(v[i]) <= act_threshold && ! clause_is_locked(s, v[i])) {
       mark_for_removal(v[i]);
     }
   }
   for (i = n/2; i<n; i++) {
-    if (! clause_is_locked(s, v[i])) {
+    if (get_used(v[i]) > 0) {
+      dec_used(v[i]);
+    } else if (! clause_is_locked(s, v[i])) {
       mark_for_removal(v[i]);
     }
   }
@@ -5527,6 +5552,11 @@ static void smt_interrupt_push(smt_core_t *s) {
 
 static void smt_interrupt_pop(smt_core_t *s) {
   if (s->interrupt_push) {
+    if (s->status == YICES_STATUS_INTERRUPTED ||
+        s->status == YICES_STATUS_SEARCHING) {
+      // Ensure smt_pop preconditions hold on interrupt cleanup paths.
+      s->status = YICES_STATUS_IDLE;
+    }
     smt_pop(s);
     s->interrupt_push = false;
   }
@@ -5548,6 +5578,22 @@ void smt_cleanup(smt_core_t *s) {
 /*
  * Clear the current boolean assignment and reset status to IDLE
  */
+/*
+ * Reset any variable values set externally (e.g., by a delegate solver via
+ * set_bvar_value) that are not legitimate DPLL base-level assignments.
+ * Variables with a non-UNDEF value but no mark bit were set outside the
+ * normal DPLL trail; leaving them assigned causes false conflicts when new
+ * unit clauses are added in a subsequent push/assert sequence.
+ */
+static void reset_external_model_values(smt_core_t *s) {
+  bvar_t x;
+  for (x = 0; x < s->nvars; x++) {
+    if (!bval_is_undef(s->value[x]) && !tst_bit(s->mark, x)) {
+      s->value[x] &= 1; /* keep polarity hint, clear assigned bits */
+    }
+  }
+}
+
 void smt_clear(smt_core_t *s) {
   assert(s->status == YICES_STATUS_SAT || s->status == YICES_STATUS_UNKNOWN);
 
@@ -5564,6 +5610,7 @@ void smt_clear(smt_core_t *s) {
   } else {
     // no state to restore. Just backtrack and clear the assignment
     backtrack_to_base_level(s);
+    reset_external_model_values(s);
     if (s->assumptions) {
       // remove the assumptions
       s->has_assumptions = false;
@@ -5591,6 +5638,7 @@ void smt_clear_unsat(smt_core_t *s) {
    */
   if (s->has_assumptions) {
     backtrack_to_base_level(s);
+    reset_external_model_values(s);
 
     // if assumptions didn't contribute the unsat result, don't clear the status
     if (s->bad_assumption != null_literal) {

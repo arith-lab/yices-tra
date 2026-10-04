@@ -32,7 +32,7 @@
  */
 #define NUM_SMT_LOGIC_NAMES NUM_SMT_LOGICS
 
-static const char * const smt_logic_names[NUM_SMT_LOGIC_NAMES] = {
+static const char * const smt_logic_names[] = {
   "ABV",
   "ALIA",
   "ALIRA",
@@ -92,6 +92,7 @@ static const char * const smt_logic_names[NUM_SMT_LOGIC_NAMES] = {
   "QF_NIRA",
   "QF_NRA",
   "QF_RDL",
+  "QF_TRA",
   "QF_UF",
   "QF_UFBV",
   "QF_UFBVLIA",
@@ -117,13 +118,15 @@ static const char * const smt_logic_names[NUM_SMT_LOGIC_NAMES] = {
   "UFRDL",
 };
 
+_Static_assert(sizeof(smt_logic_names)/sizeof(smt_logic_names[0]) == NUM_SMT_LOGIC_NAMES, "one name per logic");
+
 
 /*
  * Code table: smt_code[i] = code for smt_logic_name[i]
  * - for now, this is not very useful, but it may help later if
  *   different names correspond to the same logic
  */
-static const smt_logic_t smt_code[NUM_SMT_LOGIC_NAMES] = {
+static const smt_logic_t smt_code[] = {
   ABV,
   ALIA,
   ALIRA,
@@ -144,8 +147,8 @@ static const smt_logic_t smt_code[NUM_SMT_LOGIC_NAMES] = {
   AUFNRA,
   AX,
   BV,
-  FFA,
   BVLRA,
+  FFA,
   IDL,
   LIA,
   LIRA,
@@ -183,6 +186,7 @@ static const smt_logic_t smt_code[NUM_SMT_LOGIC_NAMES] = {
   QF_NIRA,
   QF_NRA,
   QF_RDL,
+  QF_TRA,
   QF_UF,
   QF_UFBV,
   QF_UFBVLIA,
@@ -207,6 +211,8 @@ static const smt_logic_t smt_code[NUM_SMT_LOGIC_NAMES] = {
   UFNRA,
   UFRDL,
 };
+
+_Static_assert(sizeof(smt_code)/sizeof(smt_code[0]) == NUM_SMT_LOGIC_NAMES, "one code per logic name");
 
 
 
@@ -239,9 +245,9 @@ smt_logic_t smt_logic_code(const char *logic_name) {
 /*
  * Arithmetic fragments: names in lexicographic order
  */
-static const char * const fragment_names[NUM_ARITH_FRAGMENTS] = {
-  "IDL",
+static const char * const fragment_names[] = {
   "FFA",
+  "IDL",
   "LIA",
   "LIRA",
   "LRA",
@@ -249,11 +255,14 @@ static const char * const fragment_names[NUM_ARITH_FRAGMENTS] = {
   "NIRA",
   "NRA",
   "RDL",
+  "TRA",
 };
 
-static const arith_fragment_t fragment_code[NUM_ARITH_FRAGMENTS] = {
-  ARITH_IDL,
+_Static_assert(sizeof(fragment_names)/sizeof(fragment_names[0]) == NUM_ARITH_FRAGMENTS, "one name per arithmetic fragment");
+
+static const arith_fragment_t fragment_code[] = {
   ARITH_FFA,
+  ARITH_IDL,
   ARITH_LIA,
   ARITH_LIRA,
   ARITH_LRA,
@@ -261,7 +270,10 @@ static const arith_fragment_t fragment_code[NUM_ARITH_FRAGMENTS] = {
   ARITH_NIRA,
   ARITH_NRA,
   ARITH_RDL,
+  ARITH_TRA,
 };
+
+_Static_assert(sizeof(fragment_code)/sizeof(fragment_code[0]) == NUM_ARITH_FRAGMENTS, "one code per fragment name");
 
 
 // search in these tables
@@ -291,7 +303,7 @@ arith_fragment_t arith_fragment_code(const char *name) {
 /*
  * Mapping from logic code to features/theories
  */
-static const uint8_t has_arrays[NUM_SMT_LOGICS] = {
+static const uint8_t has_arrays[] = {
   false,  // NONE
 
   true,   // AX
@@ -346,6 +358,7 @@ static const uint8_t has_arrays[NUM_SMT_LOGICS] = {
   false,  // QF_NRA
   false,  // QF_NIRA
   false,  // QF_RDL
+  false,  // QF_TRA
   false,  // QF_UF
   true,   // QF_ABV
   true,   // QF_ALIA
@@ -379,7 +392,9 @@ static const uint8_t has_arrays[NUM_SMT_LOGICS] = {
   true,   // SMT_ALL: QF_AUFLIRA + QF_BV
 };
 
-static const uint8_t has_bv[NUM_SMT_LOGICS] = {
+_Static_assert(sizeof(has_arrays)/sizeof(has_arrays[0]) == NUM_SMT_LOGICS, "one entry per logic");
+
+static const uint8_t has_bv[] = {
   false,  // NONE
 
   false,  // AX
@@ -434,6 +449,7 @@ static const uint8_t has_bv[NUM_SMT_LOGICS] = {
   false,  // QF_NRA
   false,  // QF_NIRA
   false,  // QF_RDL
+  false,  // QF_TRA
   false,  // QF_UF
   true,   // QF_ABV
   false,  // QF_ALIA
@@ -467,7 +483,9 @@ static const uint8_t has_bv[NUM_SMT_LOGICS] = {
   true,   // SMT_ALL: QF_AUFLIRA + QF_BV
 };
 
-static const uint8_t has_quantifiers[NUM_SMT_LOGICS] = {
+_Static_assert(sizeof(has_bv)/sizeof(has_bv[0]) == NUM_SMT_LOGICS, "one entry per logic");
+
+static const uint8_t has_quantifiers[] = {
   false,  // NONE
 
   true,   // AX
@@ -522,6 +540,7 @@ static const uint8_t has_quantifiers[NUM_SMT_LOGICS] = {
   false,  // QF_NRA
   false,  // QF_NIRA
   false,  // QF_RDL
+  false,  // QF_TRA
   false,  // QF_UF
   false,  // QF_ABV
   false,  // QF_ALIA
@@ -555,7 +574,9 @@ static const uint8_t has_quantifiers[NUM_SMT_LOGICS] = {
   false,   // SMT_ALL: QF_AUFLIRA + QF_BV
 };
 
-static const uint8_t has_uf[NUM_SMT_LOGICS] = {
+_Static_assert(sizeof(has_quantifiers)/sizeof(has_quantifiers[0]) == NUM_SMT_LOGICS, "one entry per logic");
+
+static const uint8_t has_uf[] = {
   false,  // NONE
 
   false,  // AX
@@ -610,6 +631,7 @@ static const uint8_t has_uf[NUM_SMT_LOGICS] = {
   false,  // QF_NRA
   false,  // QF_NIRA
   false,  // QF_RDL
+  false,  // QF_TRA
   true,   // QF_UF
   false,  // QF_ABV
   false,  // QF_ALIA
@@ -643,7 +665,9 @@ static const uint8_t has_uf[NUM_SMT_LOGICS] = {
   true,   // SMT_ALL: QF_AUFLIRA + QF_BV
 };
 
-static const uint8_t arith_frag[NUM_SMT_LOGICS] = {
+_Static_assert(sizeof(has_uf)/sizeof(has_uf[0]) == NUM_SMT_LOGICS, "one entry per logic");
+
+static const uint8_t arith_frag[] = {
   ARITH_NONE,   // NONE
 
   ARITH_NONE,   // AX
@@ -698,6 +722,7 @@ static const uint8_t arith_frag[NUM_SMT_LOGICS] = {
   ARITH_NRA,    // QF_NRA
   ARITH_NIRA,   // QF_NIRA
   ARITH_RDL,    // QF_RDL
+  ARITH_TRA,    // QF_TRA
   ARITH_NONE,   // QF_UF
   ARITH_NONE,   // QF_ABV
   ARITH_LIA,    // QF_ALIA
@@ -730,6 +755,8 @@ static const uint8_t arith_frag[NUM_SMT_LOGICS] = {
 
   ARITH_LIRA,   // SMT_ALL: QF_AUFLIRA + QF_BV
 };
+
+_Static_assert(sizeof(arith_frag)/sizeof(arith_frag[0]) == NUM_SMT_LOGICS, "one entry per logic");
 
 
 /*
@@ -769,7 +796,7 @@ arith_fragment_t arith_fragment(smt_logic_t code) {
 /*
  * Table for conversion to a quantifier-free fragment
  */
-static const smt_logic_t logic2qf[NUM_SMT_LOGICS] = {
+static const smt_logic_t logic2qf[] = {
   NONE,
 
   /*
@@ -830,6 +857,7 @@ static const smt_logic_t logic2qf[NUM_SMT_LOGICS] = {
   QF_NRA,
   QF_NIRA,
   QF_RDL,
+  QF_TRA,
   QF_UF,
   QF_ABV,
   QF_ALIA,
@@ -863,6 +891,8 @@ static const smt_logic_t logic2qf[NUM_SMT_LOGICS] = {
   SMT_ALL,
 };
 
+_Static_assert(sizeof(logic2qf)/sizeof(logic2qf[0]) == NUM_SMT_LOGICS, "one entry per logic");
+
 smt_logic_t qf_fragment(smt_logic_t code) {
   assert(code != SMT_UNKNOWN);
   return logic2qf[code];
@@ -876,7 +906,7 @@ smt_logic_t qf_fragment(smt_logic_t code) {
  *
  * - 2023/05/18: updated according to SMT-COMP 2022
  */
-static const bool is_official[NUM_SMT_LOGICS] = {
+static const bool is_official[] = {
   false,  // NONE
 
   false,  // AX
@@ -931,6 +961,7 @@ static const bool is_official[NUM_SMT_LOGICS] = {
   true,   // QF_NRA
   true,   // QF_NIRA
   true,   // QF_RDL
+  true,   // QF_TRA (false is also acceptable)
   true,   // QF_UF
   true,   // QF_ABV
   true,   // QF_ALIA
@@ -963,6 +994,8 @@ static const bool is_official[NUM_SMT_LOGICS] = {
 
   true,   // logic ALL is in SMT-LIB 2.5
 };
+
+_Static_assert(sizeof(is_official)/sizeof(is_official[0]) == NUM_SMT_LOGICS, "one entry per logic");
 
 
 bool logic_is_official(smt_logic_t code) {

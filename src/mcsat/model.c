@@ -80,6 +80,11 @@ void mcsat_model_destruct(mcsat_model_t* m) {
 }
 
 void mcsat_model_copy(mcsat_model_t* m, const mcsat_model_t* from) {
+  // The values of m are overwritten below: release them first
+  uint32_t i;
+  for (i = 0; i < m->size; ++ i) {
+    mcsat_value_destruct(m->values + i);
+  }
   mcsat_model_ensure_capacity(m, from->capacity);
   m->size = from->size;
   mcsat_value_construct_copy_n(m->values, from->values, m->size);

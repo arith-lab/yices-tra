@@ -1,0 +1,10 @@
+(set-logic QF_TRA)
+(declare-fun X () Real)
+(assert (let ((.def_1 (= (sin X) 0)))
+(let ((.def_2 (< X pi)))
+(let ((.def_3 (< 0 X)))
+(let ((.def_4 (and .def_1 .def_2)))
+(let ((.def_5 (and .def_3 .def_4)))
+.def_5))))))
+(check-sat)
+

@@ -1,0 +1,16 @@
+; A purified argument, (* 2 pi), used in and out of scopes (guard for keeping the lemmas of terms
+; with purification variables scoped).
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(push 1)
+(assert (< (exp (* 2 pi)) 536))
+(check-sat)
+(pop 1)
+(assert (> (exp x) 600))
+(assert (< x 7))
+(check-sat)
+(push 1)
+(assert (> (exp (* 2 pi)) 536))
+(check-sat)
+(pop 1)
+(check-sat)

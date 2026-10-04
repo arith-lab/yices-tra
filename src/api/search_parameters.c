@@ -56,9 +56,8 @@
 /*
  * Default clause deletion parameters
  */
-#define DEFAULT_R_THRESHOLD   1000
-#define DEFAULT_R_FRACTION    0.25
-#define DEFAULT_R_FACTOR      1.05
+#define DEFAULT_R_INITIAL_THRESHOLD   300
+#define DEFAULT_R_INTERVAL    25
 
 
 /*
@@ -84,6 +83,7 @@
  * Default branching = the smt_core default
  */
 #define DEFAULT_BRANCHING  BRANCHING_DEFAULT
+#define DEFAULT_SAT_DELEGATE SAT_DELEGATE_NONE
 
 /*
  * The default EGRAPH parameters are defined in egraph_types.h
@@ -101,6 +101,7 @@
 #define DEFAULT_USE_BOOL_DYN_ACK      false
 #define DEFAULT_USE_OPTIMISTIC_FCHECK true
 #define DEFAULT_AUX_EQ_RATIO          0.3
+#define DEFAULT_MCSAT_SUPPLEMENT_CHECK MCSAT_SUPPLEMENT_CHECK_BOTH
 
 
 /*
@@ -133,9 +134,8 @@ static const param_t default_settings = {
   DEFAULT_C_FACTOR,
   DEFAULT_D_FACTOR,
 
-  DEFAULT_R_THRESHOLD,
-  DEFAULT_R_FRACTION,
-  DEFAULT_R_FACTOR,
+  DEFAULT_R_INITIAL_THRESHOLD,
+  DEFAULT_R_INTERVAL,
 
   DEFAULT_VAR_DECAY,
   DEFAULT_RANDOMNESS,
@@ -144,6 +144,7 @@ static const param_t default_settings = {
   DEFAULT_CLAUSE_DECAY,
   DEFAULT_CACHE_TCLAUSES,
   DEFAULT_TCLAUSE_SIZE,
+  DEFAULT_SAT_DELEGATE,
 
   DEFAULT_USE_DYN_ACK,
   DEFAULT_USE_BOOL_DYN_ACK,
@@ -165,6 +166,7 @@ static const param_t default_settings = {
 
   DEFAULT_MAX_UPDATE_CONFLICTS,
   DEFAULT_MAX_EXTENSIONALITY,
+  DEFAULT_MCSAT_SUPPLEMENT_CHECK,
 };
 
 
@@ -187,10 +189,10 @@ typedef enum param_key {
   PARAM_D_THRESHOLD,
   PARAM_C_FACTOR,
   PARAM_D_FACTOR,
+  PARAM_DELEGATE,
   // clause deletion heuristic
-  PARAM_R_THRESHOLD,
-  PARAM_R_FRACTION,
-  PARAM_R_FACTOR,
+  PARAM_R_INITIAL_THRESHOLD,
+  PARAM_R_INTERVAL,
   // branching heuristic
   PARAM_VAR_DECAY,
   PARAM_RANDOMNESS,
@@ -221,9 +223,10 @@ typedef enum param_key {
   // array solver
   PARAM_MAX_UPDATE_CONFLICTS,
   PARAM_MAX_EXTENSIONALITY,
+  PARAM_MCSAT_SUPPLEMENT_CHECK,
 } param_key_t;
 
-#define NUM_PARAM_KEYS (PARAM_MAX_EXTENSIONALITY+1)
+#define NUM_PARAM_KEYS (PARAM_MCSAT_SUPPLEMENT_CHECK+1)
 
 // parameter names in lexicographic ordering
 static const char *const param_key_names[NUM_PARAM_KEYS] = {
@@ -237,6 +240,7 @@ static const char *const param_key_names[NUM_PARAM_KEYS] = {
   "clause-decay",
   "d-factor",
   "d-threshold",
+  "delegate",
   "dyn-ack",
   "dyn-ack-threshold",
   "dyn-bool-ack",
@@ -249,11 +253,11 @@ static const char *const param_key_names[NUM_PARAM_KEYS] = {
   "max-extensionality",
   "max-interface-eqs",
   "max-update-conflicts",
+  "mcsat-supplement-check",
   "optimistic-final-check",
   "prop-threshold",
-  "r-factor",
-  "r-fraction",
-  "r-threshold",
+  "r-initial-threshold",
+  "r-interval",
   "random-seed",
   "randomness",
   "simplex-adjust",
@@ -274,6 +278,7 @@ static const int32_t param_code[NUM_PARAM_KEYS] = {
   PARAM_CLAUSE_DECAY,
   PARAM_D_FACTOR,
   PARAM_D_THRESHOLD,
+  PARAM_DELEGATE,
   PARAM_DYN_ACK,
   PARAM_DYN_ACK_THRESHOLD,
   PARAM_DYN_BOOL_ACK,
@@ -286,11 +291,11 @@ static const int32_t param_code[NUM_PARAM_KEYS] = {
   PARAM_MAX_EXTENSIONALITY,
   PARAM_MAX_INTERFACE_EQS,
   PARAM_MAX_UPDATE_CONFLICTS,
+  PARAM_MCSAT_SUPPLEMENT_CHECK,
   PARAM_OPTIMISTIC_FCHECK,
   PARAM_PROP_THRESHOLD,
-  PARAM_R_FACTOR,
-  PARAM_R_FRACTION,
-  PARAM_R_THRESHOLD,
+  PARAM_R_INITIAL_THRESHOLD,
+  PARAM_R_INTERVAL,
   PARAM_RANDOM_SEED,
   PARAM_RANDOMNESS,
   PARAM_SIMPLEX_ADJUST,
@@ -322,6 +327,185 @@ static const int32_t branching_code[NUM_BRANCHING_MODES] = {
   BRANCHING_THEORY,
 };
 
+/*
+ * Supplementary MCSAT checking modes (in lexicographic order)
+ */
+static const char * const mcsat_supplement_check_modes[NUM_MCSAT_SUPPLEMENT_CHECK_MODES] = {
+  "both",
+  "final-only",
+};
+
+static const int32_t mcsat_supplement_check_code[NUM_MCSAT_SUPPLEMENT_CHECK_MODES] = {
+  MCSAT_SUPPLEMENT_CHECK_BOTH,
+  MCSAT_SUPPLEMENT_CHECK_FINAL_ONLY,
+};
+
+/*
+ * Names of delegate solvers (in lexicographic order)
+ */
+static const char * const sat_delegate_modes[NUM_SAT_DELEGATES] = {
+  "cadical",
+  "cryptominisat",
+  "kissat",
+  "none",
+  "y2sat",
+};
+
+static const int32_t sat_delegate_code[NUM_SAT_DELEGATES] = {
+  SAT_DELEGATE_CADICAL,
+  SAT_DELEGATE_CRYPTOMINISAT,
+  SAT_DELEGATE_KISSAT,
+  SAT_DELEGATE_NONE,
+  SAT_DELEGATE_Y2SAT,
+};
+
+static const char * const sat_delegate_incremental_mode_names[NUM_SAT_DELEGATE_INCREMENTAL_MODES] = {
+  "append",
+  "rebuild",
+  "selector-frames",
+};
+
+static const int32_t sat_delegate_incremental_mode_code[NUM_SAT_DELEGATE_INCREMENTAL_MODES] = {
+  SAT_DELEGATE_MODE_APPEND,
+  SAT_DELEGATE_MODE_REBUILD,
+  SAT_DELEGATE_MODE_SELECTOR_FRAMES,
+};
+
+const char *sat_delegate_name(sat_delegate_t mode) {
+  switch (mode) {
+  case SAT_DELEGATE_Y2SAT:
+    return "y2sat";
+  case SAT_DELEGATE_CADICAL:
+    return "cadical";
+  case SAT_DELEGATE_CRYPTOMINISAT:
+    return "cryptominisat";
+  case SAT_DELEGATE_KISSAT:
+    return "kissat";
+  case SAT_DELEGATE_NONE:
+  default:
+    return NULL;
+  }
+}
+
+int32_t parse_sat_delegate(const char *value, sat_delegate_t *v) {
+  int32_t k;
+
+  k = parse_as_keyword(value, sat_delegate_modes, sat_delegate_code, NUM_SAT_DELEGATES);
+  assert(k >= 0 || k == -1);
+
+  if (k >= 0) {
+    assert(SAT_DELEGATE_NONE <= k && k <= SAT_DELEGATE_KISSAT);
+    *v = (sat_delegate_t) k;
+    return 0;
+  }
+
+  return -2;
+}
+
+const char *sat_delegate_incremental_mode_name(sat_delegate_incremental_mode_t mode) {
+  switch (mode) {
+  case SAT_DELEGATE_MODE_REBUILD:
+    return "rebuild";
+  case SAT_DELEGATE_MODE_APPEND:
+    return "append";
+  case SAT_DELEGATE_MODE_SELECTOR_FRAMES:
+    return "selector-frames";
+  default:
+    return NULL;
+  }
+}
+
+int32_t parse_sat_delegate_incremental_mode(const char *value, sat_delegate_incremental_mode_t *v) {
+  int32_t k;
+
+  k = parse_as_keyword(value, sat_delegate_incremental_mode_names,
+                       sat_delegate_incremental_mode_code, NUM_SAT_DELEGATE_INCREMENTAL_MODES);
+  assert(k >= 0 || k == -1);
+
+  if (k >= 0) {
+    assert(SAT_DELEGATE_MODE_REBUILD <= k && k <= SAT_DELEGATE_MODE_SELECTOR_FRAMES);
+    *v = (sat_delegate_incremental_mode_t) k;
+    return 0;
+  }
+
+  return -2;
+}
+
+sat_delegate_incremental_mode_t sat_delegate_default_incremental_mode(sat_delegate_t delegate, bool one_check) {
+  if (one_check) {
+    return SAT_DELEGATE_MODE_REBUILD;
+  }
+
+  switch (delegate) {
+  case SAT_DELEGATE_Y2SAT:
+    return SAT_DELEGATE_MODE_APPEND;
+  case SAT_DELEGATE_CADICAL:
+  case SAT_DELEGATE_CRYPTOMINISAT:
+    return SAT_DELEGATE_MODE_SELECTOR_FRAMES;
+  case SAT_DELEGATE_KISSAT:
+  case SAT_DELEGATE_NONE:
+  default:
+    return SAT_DELEGATE_MODE_REBUILD;
+  }
+}
+
+bool sat_delegate_incremental_mode_supported(sat_delegate_t delegate, sat_delegate_incremental_mode_t mode) {
+  switch (mode) {
+  case SAT_DELEGATE_MODE_REBUILD:
+    return true;
+  case SAT_DELEGATE_MODE_APPEND:
+    return delegate == SAT_DELEGATE_Y2SAT ||
+           delegate == SAT_DELEGATE_CADICAL ||
+           delegate == SAT_DELEGATE_CRYPTOMINISAT;
+  case SAT_DELEGATE_MODE_SELECTOR_FRAMES:
+    return delegate == SAT_DELEGATE_CADICAL ||
+           delegate == SAT_DELEGATE_CRYPTOMINISAT;
+  default:
+    return false;
+  }
+}
+
+bool effective_sat_delegate_incremental_mode(sat_delegate_t delegate,
+                                             sat_delegate_incremental_mode_t config_mode,
+                                             bool config_mode_set,
+                                             bool one_check_context,
+                                             bool one_shot_delegate,
+                                             sat_delegate_incremental_mode_t *mode) {
+  if (one_shot_delegate) {
+    *mode = SAT_DELEGATE_MODE_REBUILD;
+    return true;
+  }
+
+  if (config_mode_set) {
+    *mode = config_mode;
+    return !(one_check_context && *mode != SAT_DELEGATE_MODE_REBUILD) &&
+           sat_delegate_incremental_mode_supported(delegate, *mode);
+  }
+
+  *mode = sat_delegate_default_incremental_mode(delegate, one_check_context);
+  return true;
+}
+
+sat_delegate_t effective_sat_delegate_mode(sat_delegate_t config_delegate, const param_t *params, bool *one_shot) {
+  sat_delegate_t req;
+
+  req = SAT_DELEGATE_NONE;
+  if (params != NULL) {
+    req = params->delegate;
+  }
+
+  if (req != SAT_DELEGATE_NONE) {
+    if (one_shot != NULL) {
+      *one_shot = (req != config_delegate || config_delegate == SAT_DELEGATE_NONE);
+    }
+    return req;
+  }
+
+  if (one_shot != NULL) {
+    *one_shot = false;
+  }
+  return config_delegate;
+}
 
 
 
@@ -378,6 +562,37 @@ static int32_t set_branching_param(const char *value, branch_t *v) {
   }
 
   return k;
+}
+
+/*
+ * Parse value as supplementary MCSAT check mode. Store the result in *v.
+ * - return 0 if this works
+ * - return -2 otherwise
+ */
+static int32_t set_mcsat_supplement_check_param(const char *value, mcsat_supplement_check_t *v) {
+  int32_t k;
+
+  k = parse_as_keyword(value, mcsat_supplement_check_modes, mcsat_supplement_check_code,
+                       NUM_MCSAT_SUPPLEMENT_CHECK_MODES);
+  assert(k >= 0 || k == -1);
+
+  if (k >= 0) {
+    assert(MCSAT_SUPPLEMENT_CHECK_BOTH <= k && k <= MCSAT_SUPPLEMENT_CHECK_FINAL_ONLY);
+    *v = (mcsat_supplement_check_t) k;
+    k = 0;
+  } else {
+    k = -2;
+  }
+  return k;
+}
+
+/*
+ * Parse value as a SAT delegate mode. Store the result in *v
+ * - return 0 if this works
+ * - return -2 otherwise
+ */
+static int32_t set_sat_delegate_param(const char *value, sat_delegate_t *v) {
+  return parse_sat_delegate(value, v);
 }
 
 
@@ -523,20 +738,29 @@ int32_t params_set_field(param_t *parameters, const char *key, const char *value
     r = set_double_param(value, &parameters->d_factor, 1.0, DBL_MAX);
     break;
 
-  case PARAM_R_THRESHOLD:
-    r = set_int32_param(value, &z, 1, INT32_MAX);
+  case PARAM_DELEGATE:
+    r = set_sat_delegate_param(value, &parameters->delegate);
+    break;
+
+  case PARAM_R_INITIAL_THRESHOLD: {
+    uint32_t u;
+    r = set_uint32_param(value, &u);
     if (r == 0) {
-      parameters->r_threshold = z;
+      if (u == 0) r = -2;
+      else parameters->r_initial_threshold = u;
     }
     break;
+  }
 
-  case PARAM_R_FRACTION:
-    r = set_double_param(value, &parameters->r_fraction, 0.0, 1.0);
+  case PARAM_R_INTERVAL: {
+    uint32_t u;
+    r = set_uint32_param(value, &u);
+    if (r == 0) {
+      if (u == 0) r = -2;
+      else parameters->r_interval = u;
+    }
     break;
-
-  case PARAM_R_FACTOR:
-    r = set_double_param(value, &parameters->r_factor, 1.0, DBL_MAX);
-    break;
+  }
 
   case PARAM_VAR_DECAY:
     r = set_double_param(value, &parameters->var_decay, 0.0, 1.0);
@@ -683,6 +907,10 @@ int32_t params_set_field(param_t *parameters, const char *key, const char *value
     if (r == 0) {
       parameters->max_extensionality = (uint32_t) z;
     }
+    break;
+
+  case PARAM_MCSAT_SUPPLEMENT_CHECK:
+    r = set_mcsat_supplement_check_param(value, &parameters->mcsat_supplement_check);
     break;
 
   default:

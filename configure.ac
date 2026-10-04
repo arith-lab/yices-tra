@@ -117,7 +117,54 @@ else
   esac
 fi
 
+dnl
+dnl Check that the C compiler supports -std=gnu11
+dnl ---------------------------------------------
+dnl
+dnl Yices requires C11. We ask for the GNU dialect rather than strict
+dnl -std=c11: strict conformance defines __STRICT_ANSI__, which hides the
+dnl POSIX/BSD interfaces the sources use (strdup, strerror_r, fdopen, fileno,
+dnl strtok_r, getc_unlocked, getpagesize, pthread_mutexattr_settype, ...).
+dnl
+dnl We check two things: that $CC accepts the flag, and that it actually
+dnl delivers C11. A compiler that accepts -std=gnu11 but reports an older
+dnl __STDC_VERSION__ is rejected. Configure fails if either check fails.
+dnl
+C_STD="-std=gnu11"
+csl_saved_cflags=$CFLAGS
+CFLAGS="$CFLAGS $C_STD"
+AC_MSG_CHECKING([whether $CC supports -std=gnu11])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
+#error "C11 is not supported"
+#endif
+_Static_assert(1, "C11 static assertions are available");
+  ]],
+  [[]])],
+  [AC_MSG_RESULT(yes)],
+  [AC_MSG_RESULT(no)
+   AC_MSG_ERROR([*** $CC does not support -std=gnu11. Yices requires a C11 compiler: GCC 4.9 or newer, or Clang 3.3 or newer ***])])
+CFLAGS=$csl_saved_cflags
+AC_SUBST(C_STD)
 
+dnl
+dnl Check that the C compiler accepts -Wpedantic
+dnl --------------------------------------------
+dnl
+dnl The API tests (tests/api) are compiled with -Wpedantic. GCC rejects an
+dnl unknown warning option, but Clang only warns about it, so the check adds
+dnl -Werror. Configure fails if the flag is not accepted.
+dnl
+csl_saved_cflags=$CFLAGS
+CFLAGS="$C_STD -Wpedantic -Werror"
+AC_MSG_CHECKING([whether $CC accepts -Wpedantic])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[]], [[]])],
+  [AC_MSG_RESULT(yes)],
+  [AC_MSG_RESULT(no)
+   AC_MSG_ERROR([*** $CC does not accept -Wpedantic, which Yices requires. See INSTALL for the supported compilers ***])])
+CFLAGS=$csl_saved_cflags
 
 dnl
 dnl Check whether the C compiler accepts the flag -fno-stack-protector
@@ -147,13 +194,12 @@ else
 fi;
 AC_SUBST(NO_STACK_PROTECTOR)
 
-
 dnl
 dnl Check for endianness
 dnl --------------------
 dnl
 WORDS_BIGENDIAN=""
-AC_C_BIGENDIAN([WORDS_BIGENDIAN=yes],[WORDS_BIGENDIAN=no],[WORDS_BIGENDIAN=yes])
+AC_C_BIGENDIAN([WORDS_BIGENDIAN=yes],[WORDS_BIGENDIAN=no],[WORDS_BIGENDIAN=yes],[WORDS_BIGENDIAN=no])
 AC_SUBST(WORDS_BIGENDIAN)
 
 dnl
@@ -182,7 +228,6 @@ AC_MSG_RESULT([$has_tls])
 CPPFLAGS=$save_cppflags
 LIBS=$save_libs
 ])
-
 
 
 dnl
@@ -277,15 +322,18 @@ AC_ARG_WITH([pic-gmp-include-dir],
 dnl
 dnl Options for mcsat and the libpoly library
 dnl -----------------------------------------
-dnl --enable-mcsat: add support for MCSAT
+dnl --disable-mcsat: remove support for MCSAT (enabled by default)
 dnl
 dnl If mcsat is emabled, we provide options to specify
 dnl the static libraries, using the same conventions as for GMP.
 dnl
-use_mcsat="no"
+use_mcsat="yes"
 AC_ARG_ENABLE([mcsat],
-   [AS_HELP_STRING([--enable-mcsat],[Enable support for MCSAT. This requires the LibPoly library and the CUDD library.])],
-   [if test "$enableval" = yes ; then 
+   [AS_HELP_STRING([--disable-mcsat],[Disable support for MCSAT. MCSAT is enabled by default and requires the LibPoly library and the CUDD library.])],
+   [if test "$enableval" = no ; then
+      use_mcsat="no"
+      AC_MSG_NOTICE([Disabling support for MCSAT])
+    else
       use_mcsat="yes"
       AC_MSG_NOTICE([Enabling support for MCSAT])
     fi],
@@ -353,6 +401,70 @@ AC_ARG_WITH([pic-libpoly-include-dir],
       fi
     fi
    ],
+   [])
+
+
+dnl
+dnl Static delegate archive inputs
+dnl ------------------------------
+dnl Delegate selection is still controlled by CPPFLAGS=-DHAVE_...
+dnl in this release. These options only provide the raw static
+dnl delegate archives and headers needed by static delegate builds.
+dnl
+static_depdir='$(BUILD)/static_deps'
+AC_ARG_WITH([static-dep-dir],
+   [AS_HELP_STRING([--with-static-dep-dir=<directory>],
+            [Directory where make writes generated static dependency artifacts])],
+   [if test "x$withval" = x; then
+      AC_MSG_WARN([--with-static-dep-dir was used but no directory was given. Using defaults])
+    else
+      case "$withval" in
+        /*) static_depdir=$withval ;;
+        *) static_depdir=`pwd`/$withval ;;
+      esac
+    fi
+   ],
+   [])
+
+static_delegates=""
+AC_ARG_WITH([static-delegates],
+   [AS_HELP_STRING([--with-static-delegates=<directory>],
+            [Directory containing raw static delegate archives])],
+   [if test "x$withval" = x; then
+      AC_MSG_WARN([--with-static-delegates was used but no directory was given. Ignoring])
+    else
+      case "$withval" in
+        /*) static_delegates=$withval ;;
+        *) static_delegates=`pwd`/$withval ;;
+      esac
+    fi
+   ],
+   [])
+
+static_include_delegates=""
+AC_ARG_WITH([static-delegates-include-dir],
+   [AS_HELP_STRING([--with-static-delegates-include-dir=<directory>],
+            [Directory containing delegate headers for static builds])],
+   [if test "x$withval" = x; then
+      AC_MSG_WARN([--with-static-delegates-include-dir was used but no directory was given. Ignoring])
+    else
+      case "$withval" in
+        /*) static_include_delegates=$withval ;;
+        *) static_include_delegates=`pwd`/$withval ;;
+      esac
+    fi
+   ],
+   [])
+
+
+dynamic_delegates_assume_hidden_kitten="no"
+AC_ARG_ENABLE([dynamic-delegates-assuming-hidden-kitten],
+   [AS_HELP_STRING([--enable-dynamic-delegates-assuming-hidden-kitten],
+            [Allow dynamic CaDiCaL+Kissat targets assuming delegate shared libraries hide private Kitten symbols])],
+   [if test "$enableval" = yes ; then
+      dynamic_delegates_assume_hidden_kitten="yes"
+      AC_MSG_NOTICE([Assuming dynamic delegate libraries hide private Kitten symbols])
+    fi],
    [])
 
 
@@ -493,6 +605,54 @@ if test "x$2" != x; then
   else
      AC_MSG_ERROR([*** directory $2 not found. Check option $3 ***])
   fi
+fi
+])
+
+
+dnl
+dnl CSL_DELEGATE_ENABLED(symbol)
+dnl ----------------------------
+dnl Check whether CPPFLAGS contains -Dsymbol or -Dsymbol=value.
+dnl Sets delegate_enabled to yes or no.
+dnl
+AC_DEFUN([CSL_DELEGATE_ENABLED],
+[
+delegate_enabled=no
+prev_d_opt=no
+for cpp_arg in $CPPFLAGS; do
+  if test "$prev_d_opt" = yes; then
+     if test "$cpp_arg" = "$1"; then
+        delegate_enabled=yes
+     else
+        case "$cpp_arg" in
+          $1=*) delegate_enabled=yes ;;
+        esac
+     fi
+     prev_d_opt=no
+  else
+     case "$cpp_arg" in
+       -D$1|-D$1=*) delegate_enabled=yes ;;
+       -D) prev_d_opt=yes ;;
+     esac
+  fi
+done
+])
+
+
+dnl
+dnl CSL_CHECK_STATIC_DELEGATE_ARCHIVE(directory,archive)
+dnl ----------------------------------------------------
+dnl Check that directory/archive exists and set testlib to the full path.
+dnl
+AC_DEFUN([CSL_CHECK_STATIC_DELEGATE_ARCHIVE],
+[
+testlib="$1/$2"
+AC_MSG_CHECKING([for $2 in $1])
+if test -f "$testlib"; then
+   AC_MSG_RESULT(found)
+else
+   AC_MSG_RESULT(no)
+   AC_MSG_ERROR([*** $testlib was not found: check option --with-static-delegates ***])
 fi
 ])
 
@@ -827,39 +987,118 @@ if test $use_mcsat = yes ; then
 fi
 
 #
+# Static delegate archive inputs
+#
+HAVE_CADICAL_DELEGATE=no
+HAVE_CRYPTOMINISAT_DELEGATE=no
+HAVE_KISSAT_DELEGATE=no
+
+CSL_DELEGATE_ENABLED([HAVE_CADICAL])
+if test $delegate_enabled = yes ; then
+   HAVE_CADICAL_DELEGATE=yes
+fi
+
+CSL_DELEGATE_ENABLED([HAVE_CRYPTOMINISAT])
+if test $delegate_enabled = yes ; then
+   HAVE_CRYPTOMINISAT_DELEGATE=yes
+fi
+
+CSL_DELEGATE_ENABLED([HAVE_KISSAT])
+if test $delegate_enabled = yes ; then
+   HAVE_KISSAT_DELEGATE=yes
+fi
+
+STATIC_DEPDIR="$static_depdir"
+STATIC_DELEGATES_INCLUDE_DIR=""
+STATIC_CADICAL_RAW=""
+STATIC_CRYPTOMINISAT_RAW=""
+STATIC_KISSAT_RAW=""
+STATIC_KISSAT_YICES=""
+DYNAMIC_DELEGATES_ASSUME_HIDDEN_KITTEN="$dynamic_delegates_assume_hidden_kitten"
+
+AC_SUBST(HAVE_CADICAL_DELEGATE)
+AC_SUBST(HAVE_CRYPTOMINISAT_DELEGATE)
+AC_SUBST(HAVE_KISSAT_DELEGATE)
+AC_SUBST(STATIC_DEPDIR)
+AC_SUBST(STATIC_DELEGATES_INCLUDE_DIR)
+AC_SUBST(STATIC_CADICAL_RAW)
+AC_SUBST(STATIC_CRYPTOMINISAT_RAW)
+AC_SUBST(STATIC_KISSAT_RAW)
+AC_SUBST(STATIC_KISSAT_YICES)
+AC_SUBST(DYNAMIC_DELEGATES_ASSUME_HIDDEN_KITTEN)
+
+if test "x$static_include_delegates" != x ; then
+   if test -d "$static_include_delegates" ; then
+      STATIC_DELEGATES_INCLUDE_DIR="$static_include_delegates"
+   else
+      AC_MSG_ERROR([*** directory $static_include_delegates not found. Check option --with-static-delegates-include-dir ***])
+   fi
+fi
+
+if test "x$static_delegates" != x ; then
+   if test ! -d "$static_delegates" ; then
+      AC_MSG_ERROR([*** directory $static_delegates not found. Check option --with-static-delegates ***])
+   fi
+
+   if test $HAVE_CADICAL_DELEGATE = yes ; then
+      CSL_CHECK_STATIC_DELEGATE_ARCHIVE([$static_delegates],[libcadical.a])
+      STATIC_CADICAL_RAW=$testlib
+      CSL_CHECK_HEADER([ccadical.h],$static_include_delegates,--with-static-delegates-include-dir)
+   fi
+
+   if test $HAVE_CRYPTOMINISAT_DELEGATE = yes ; then
+      CSL_CHECK_STATIC_DELEGATE_ARCHIVE([$static_delegates],[libcryptominisat5.a])
+      STATIC_CRYPTOMINISAT_RAW=$testlib
+      CSL_CHECK_HEADER([cryptominisat5/cmsat_c.h],$static_include_delegates,--with-static-delegates-include-dir)
+   fi
+
+   if test $HAVE_KISSAT_DELEGATE = yes ; then
+      CSL_CHECK_STATIC_DELEGATE_ARCHIVE([$static_delegates],[libkissat.a])
+      STATIC_KISSAT_RAW=$testlib
+      STATIC_KISSAT_YICES='$(STATIC_DEPDIR)/libkissat_yices.a'
+      CSL_CHECK_HEADER([kissat.h],$static_include_delegates,--with-static-delegates-include-dir)
+   fi
+else
+   if test $HAVE_CADICAL_DELEGATE = yes && test $HAVE_KISSAT_DELEGATE = yes ; then
+      AC_MSG_WARN([CaDiCaL and Kissat both export private Kitten symbols. Static builds must configure --with-static-delegates=DIR so make can generate libkissat_yices.a.])
+   fi
+fi
+
+#
 # Default GMP
 #
 AC_CHECK_LIB(gmp, __gmpz_cmp, [],
     [AC_MSG_ERROR([*** GMP library not found. Try to set LDFLAGS ***])])
 
+
 #
-# NTA Dependencies
+# Default libpoly
 #
-if test "$use_mcsat" = yes ; then
-    # Default Libpoly (required for MCSAT with both NRA and NTA)
-    AC_CHECK_LIB([poly],[lp_polynomial_new], [], [AC_MSG_ERROR([*** libpoly library not found. Try to set LDFLAGS ***])])
-
-    # Check for FLINT/Arb headers
-    AC_CHECK_HEADERS([flint/fmpz.h flint/arb.h],
-        [],
-        [AC_MSG_ERROR([*** Required FLINT/Arb headers not found. Please set CPPFLAGS="-I/path/to/flint/include" before running ./configure ***])])
-
-    # Default FLINT
-    AC_CHECK_LIB([flint],[fmpz_init],
-        [],
-        [AC_MSG_ERROR([*** FLINT library not found. Try to set LDFLAGS ***])])
-
-    # Check ARB as part of FLINT
-    AC_CHECK_LIB([flint],[arb_init],
-        [],
-        [AC_MSG_ERROR([*** Arb functions not found in FLINT library. Please upgrade your FLINT version and set LDFLAGS appropriately. ***])])
-
-   # Default MPFR
-   AC_CHECK_LIB([mpfr],[mpfr_init2], [], [AC_MSG_ERROR([*** MPFR library not found. Try to set LDFLAGS ***])])
-
-   # Default CUDD
-   AC_CHECK_LIB([cudd],[Cudd_Init], [], [AC_MSG_ERROR([*** CUDD library not found. Try to set LDFLAGS ***])])
+if test $use_mcsat = yes ; then
+   AC_CHECK_LIB([poly],[lp_polynomial_new], [], [AC_MSG_ERROR([*** libpoly library not found. Try to set LDFLAGS ***])])
 fi
+
+#
+# FLINT (which includes Arb) and MPFR, for the TRA plugin. AC_CHECK_LIB prepends to LIBS, so
+# MPFR is checked first: FLINT uses MPFR, and a static link needs -lflint before -lmpfr.
+#
+if test $use_mcsat = yes ; then
+   AC_CHECK_LIB([mpfr],[mpfr_init2], [], [AC_MSG_ERROR([*** MPFR library not found. Try to set LDFLAGS ***])])
+   AC_CHECK_HEADERS([flint/fmpz.h flint/arb.h], [],
+      [AC_MSG_ERROR([*** Required FLINT/Arb headers not found. Please set CPPFLAGS="-I/path/to/flint/include" before running ./configure ***])])
+   AC_CHECK_LIB([flint],[fmpz_init], [], [AC_MSG_ERROR([*** FLINT library not found. Try to set LDFLAGS ***])])
+   # Arb is part of FLINT since version 3. The action ":" keeps a second -lflint out of LIBS
+   AC_CHECK_LIB([flint],[arb_init], [:],
+      [AC_MSG_ERROR([*** Arb functions not found in FLINT library. Please upgrade your FLINT version and set LDFLAGS appropriately. ***])])
+fi
+
+#
+# Default CUDD
+#
+if test $use_mcsat = yes ; then 
+   AC_CHECK_LIB([cudd],[Cudd_Init], [], [AC_MSG_ERROR([*** CUDD library not found. Try to set LDFLAGS ***])])   
+fi
+
 
 #
 # Fix MKDIR_P to an absolute path if it's set to './install-sh -c -d'

@@ -128,6 +128,7 @@ typedef enum smt_logic {
   QF_NRA,      // non-linear real arithmetic
   QF_NIRA,     // non-linear mixed arithmetic
   QF_RDL,      // real difference logic
+  QF_TRA,      // transcendental arithmetic
   QF_UF,       // uninterpreted functions
 
   //  Arrays + some other theory
@@ -198,6 +199,7 @@ typedef enum arith_fragment {
   ARITH_NRA,   // non-linear real arithmetic
   ARITH_NIRA,  // non-linear mixed arithmetic
   ARITH_FFA,   // finite field arithmetic
+  ARITH_TRA,
   ARITH_NONE,  // no arithmetic
 } arith_fragment_t;
 

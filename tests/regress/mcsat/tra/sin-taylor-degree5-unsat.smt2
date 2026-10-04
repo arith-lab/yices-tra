@@ -1,0 +1,5 @@
+(set-logic QF_TRA)
+(declare-fun x () Real)
+(assert (= x (/ 2 5)))
+(assert (< (sin x) (/ 389 1000)))
+(check-sat)

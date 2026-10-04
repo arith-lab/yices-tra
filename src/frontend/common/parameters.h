@@ -56,9 +56,8 @@ typedef enum yices_param {
   PARAM_D_THRESHOLD,
   PARAM_D_FACTOR,
   // clause deletion heuristic
-  PARAM_R_THRESHOLD,
-  PARAM_R_FRACTION,
-  PARAM_R_FACTOR,
+  PARAM_R_INITIAL_THRESHOLD,
+  PARAM_R_INTERVAL,
   // branching heuristic
   PARAM_VAR_DECAY,
   PARAM_RANDOMNESS,
@@ -123,13 +122,11 @@ typedef enum yices_param {
   PARAM_MCSAT_NA_BOUND_MIN,
   PARAM_MCSAT_NA_BOUND_MAX,
   PARAM_MCSAT_BV_VAR_SIZE,
-  PARAM_MCSAT_DIV_NEQ0,
-  PARAM_MCSAT_BOOL_FIRST,
-  PARAM_MCSAT_BOOL_FREQ,
   PARAM_MCSAT_VAR_ORDER,
   PARAM_MCSAT_PARTIAL_RESTART,
-  PARAM_MCSAT_NO_SIN_PERIOD,
-  PARAM_MCSAT_NTA_DELTA,
+  PARAM_MCSAT_VAL_DELTA_MODE,
+  PARAM_MCSAT_L2O,
+  PARAM_MCSAT_SUPPLEMENT_CHECK,
   // error
   PARAM_UNKNOWN
 } yices_param_t;
@@ -213,6 +210,12 @@ extern bool param_val_to_terms(const char *name, const param_val_t *v, ivector_t
  * - allowed modes are 'default' 'positive' 'negative' 'theory' 'th-neg' 'th-pos'
  */
 extern bool param_val_to_branching(const char *name, const param_val_t *v, branch_t *value, char **reason);
+
+/*
+ * Supplementary MCSAT check mode
+ * - allowed modes are "both" and "final-only"
+ */
+extern bool param_val_to_mcsat_supplement_check(const char *name, const param_val_t *v, mcsat_supplement_check_t *value, char **reason);
 
 /*
  * EF generalization mode

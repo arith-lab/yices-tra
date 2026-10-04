@@ -6,14 +6,20 @@
 	dh $@ --with autoreconf
 
 override_dh_auto_configure:
-	dh_auto_configure -- --prefix=/usr --host=$(DEB_HOST_MULTIARCH) --enable-mcsat  CPPFLAGS=-DHAVE_CADICAL LIBS="-lcadical -lstdc++ -lm"
+	dh_auto_configure -- --prefix=/usr --host=$(DEB_HOST_MULTIARCH)
 
 override_dh_auto_build:
 	$(MAKE) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" STRIP=echo ARCH=$(DEB_HOST_MULTIARCH)
 
+# The regression tests of YicesTRA (tests/regress/mcsat/tra), skipped under DEB_BUILD_OPTIONS=nocheck
 override_dh_auto_test:
-	$(MAKE) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" ARCH=$(DEB_HOST_MULTIARCH)  check
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	$(MAKE) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" ARCH=$(DEB_HOST_MULTIARCH) tra-regress
+else
+	@echo "nocheck: the regression tests are skipped"
+endif
 
+# Installs ytra only
 override_dh_auto_install:
 	$(MAKE) DESTDIR=$$(pwd)/debian/tmp/ prefix=/usr ARCH=$(DEB_HOST_MULTIARCH) install
 
@@ -23,6 +29,3 @@ override_dh_clean:
 
 override_dh_auto_clean:
 	@echo "overriding auto clean"
-
-override_dh_strip:
-	 dh_strip --dbg-package=yices2-dbg
