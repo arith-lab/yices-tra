@@ -1,0 +1,241 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1f1f1f;
+  --muted: #5f5f5f;
+  --link: #0b4f8a;
+  --code-bg: #f3f3f3;
+  --term-bg: #1e1e1e;
+  --term-fg: #e8e8e8;
+  --border: #d8d8d8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171717;
+    --fg: #e4e4e4;
+    --muted: #a5a5a5;
+    --link: #7fb3e6;
+    --code-bg: #232323;
+    --term-bg: #0e0e0e;
+    --term-fg: #e4e4e4;
+    --border: #3a3a3a;
+  }
+}
+
+html {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+body {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+a {
+  color: var(--link);
+}
+
+h1 {
+  font-size: 2rem;
+  margin: 0 0 0.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* An <object>, so that the logo can react to clicks; its size is not derived from the SVG as for <img>. */
+h1 .logo {
+  height: 3.6rem;
+  width: 3.6rem;
+}
+
+h2 {
+  font-size: 1.4rem;
+  margin: 2.2rem 0 0.6rem;
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+h3 {
+  font-size: 1.1rem;
+  margin: 1.6rem 0 0.4rem;
+}
+
+header .tagline {
+  color: var(--muted);
+  margin: 0 0 0.8rem;
+}
+
+nav a {
+  margin-right: 1.2rem;
+}
+
+p {
+  margin: 0.7rem 0;
+}
+
+ul, ol {
+  padding-left: 1.4rem;
+}
+
+li {
+  margin: 0.25rem 0;
+}
+
+code, pre, kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+}
+
+code {
+  background: var(--code-bg);
+  padding: 0.05em 0.3em;
+  border-radius: 3px;
+}
+
+pre {
+  background: var(--code-bg);
+  padding: 0.8rem 1rem;
+  border-radius: 4px;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
+
+pre.term {
+  background: var(--term-bg);
+  color: var(--term-fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: visible; /* lines wrap, and tooltips must not be clipped */
+}
+
+.math {
+  font-family: "Times New Roman", Times, serif;
+  font-size: 1.15em;
+  text-align: center;
+  margin: 1rem 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.8rem 0;
+}
+
+th, td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  font-weight: 600;
+}
+
+td:first-child {
+  white-space: nowrap;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 0.95em;
+}
+
+/* Funding acknowledgement, with the "Co-funded by the European Union" emblem. */
+.funding {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 1.4rem 0;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.funding p {
+  margin: 0;
+}
+
+.eu-emblem {
+  flex: none;
+}
+
+.eu-emblem img {
+  display: block;
+  width: 5rem;
+  height: auto;
+}
+
+@media (max-width: 40rem) {
+  .funding {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+footer {
+  margin-top: 3rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+/* Hover (or tap/focus) tooltips: <code class="tip" tabindex="0" data-tip="...">. */
+.tip {
+  position: relative;
+  cursor: help;
+  border-bottom: 1px dotted currentColor;
+}
+
+.tip:hover::after, .tip:focus::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: var(--tip-dx, 0px);
+  bottom: 130%;
+  z-index: 1;
+  width: max-content;
+  max-width: min(26rem, var(--tip-max, 26rem));
+  box-sizing: border-box;
+  padding: 0.3em 0.6em;
+  border-radius: 4px;
+  background: var(--fg);
+  color: var(--bg);
+  font: 0.85rem/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  white-space: normal;
+}
+
+pre.term .tip:hover::after, pre.term .tip:focus::after {
+  background: var(--term-fg);
+  color: var(--term-bg);
+}
+
+.tip:focus {
+  outline: none;
+}
+
+/* On narrow screens a tooltip could leave the viewport: show it as a bar at the bottom instead. */
+@media (max-width: 40rem) {
+  .tip:hover::after, .tip:focus::after {
+    position: fixed;
+    left: 1rem;
+    right: 1rem;
+    bottom: 1rem;
+    width: auto;
+    max-width: none;
+    padding: 0.6em 0.8em;
+  }
+}
