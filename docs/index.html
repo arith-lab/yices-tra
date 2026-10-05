@@ -27,19 +27,21 @@
 <main>
 
 <p>
-<strong>YicesTRA</strong> is a tool to decide the satisfiability of quantifier-free formulas of
-<em class="tip" tabindex="0" data-tip="Boolean combination of polynomial inequalities">non-linear real arithmetic</em> extended with
-<em class="tip" tabindex="0" data-tip="Any function that is not definable by polynomials">transcendental functions</em>. The current version supports the sine function <code>sin</code>,
-the exponential function <code>exp</code>, and the constant <code>pi</code>.
-The tool is an extension of the <a href="https://github.com/SRI-CSL/yices2">Yices 2</a> SMT solver. The source code is available
-<a href="https://github.com/arith-lab/yices-tra">here</a> under the GPLv3 license.
+  <strong>YicesTRA</strong> is a tool to decide the satisfiability of quantifier-free formulas of
+  <em class="tip" tabindex="0" data-tip="Boolean combination of polynomial inequalities">non-linear real arithmetic</em> extended with
+  <em class="tip" tabindex="0" data-tip="Any function that is not definable by polynomials">transcendental functions</em>. 
+  The current version supports the sine function <code>sin</code>, the exponential function <code>exp</code>, and the constant <code>pi</code>.
+  The tool is an extension of the 
+  <a href="https://github.com/SRI-CSL/yices2">Yices 2</a> SMT solver. 
+  The source code is available
+  <a href="https://github.com/arith-lab/yices-tra">here</a> under the GPLv3 license.
 </p>
 
-<p>
-YicesTRA has two modes. By default it looks for an exact answer and only reports <code class="tip" tabindex="0" data-tip="The formula has a solution">sat</code> or <code class="tip" tabindex="0" data-tip="The formula has no solution">unsat</code>.
-When a tolerance &delta; is fixed by the user with the option <code>--mcsat-delta</code> (see <a href="#delta">below</a>), the solver
-additionally reports <code class="tip" tabindex="0" data-tip="The solver found a solution for a perturbation of the input formula. The satisfiability status of the input formula is still unknown">delta-sat</code>, and stops as soon as an assignment satisfies the formula up to &delta;.
-</p>
+<p>YicesTRA operates in two modes:</p>
+<ul>
+  <li><strong>default mode:</strong> Checks for an exact solution and returns <code>sat</code> or <code>unsat</code>.</li>
+  <li><strong>&delta;-satisfiability mode (option <code>--mcsat-delta</code>):</strong> Allows a user-specified tolerance (&delta;). It stops and reports <code>delta-sat</code> if a solution satisfies the formula within that &delta; margin  (see <a href="#delta">below</a>).</li>
+</ul>
 
 <div class="funding">
   <picture class="eu-emblem">
@@ -56,8 +58,8 @@ additionally reports <code class="tip" tabindex="0" data-tip="The solver found a
 <h2 id="example">Examples</h2>
 
 <p>
-Consider the following formula, which asks for a real number in the interval [0, &pi;/2]
-whose sine has a square larger than 1/2 and whose exponential is smaller than 3:
+  Consider the following formula, which asks for a real number in the interval [0, &pi;/2]
+  whose sine has a square larger than 1/2 and whose exponential is smaller than 3:
 </p>
 
 <p class="math">
@@ -67,8 +69,8 @@ whose sine has a square larger than 1/2 and whose exponential is smaller than 3:
 <h3>Encoding the formula</h3>
 
 <p>
-YicesTRA reads the <a href="https://smt-lib.org/">SMT-LIB 2</a> format. The formula
-above is encoded as follows (<a href="examples/intro.smt2">intro.smt2</a>):
+  YicesTRA reads the <a href="https://smt-lib.org/">SMT-LIB 2</a> format. The formula
+  above is encoded as follows (<a href="examples/intro.smt2">intro.smt2</a>):
 </p>
 
 <pre><code>(set-logic QF_TRA)
@@ -78,57 +80,57 @@ above is encoded as follows (<a href="examples/intro.smt2">intro.smt2</a>):
 (assert (&gt; (* (sin x) (sin x)) (/ 1 2)))
 (assert (&lt; (exp x) 3))
 (check-sat)
-(get-model)</code></pre>
+(get-model)</code>
+</pre>
 
 <p>
-The logic <code>QF_TRA</code> tells the solver that the formula belongs to transcendental
-real arithmetic. Within this logic the symbols <code>sin</code>, <code>exp</code> and <code>pi</code>
-are predefined and must not be declared. Everything else is standard SMT-LIB 2.
+  The logic <code>QF_TRA</code> tells the solver that the formula belongs to transcendental
+  real arithmetic. Within this logic the symbols <code>sin</code>, <code>exp</code> and <code>pi</code>
+  are predefined and must not be declared. Everything else is standard SMT-LIB 2.
 </p>
 
 <h3>Solving the formula</h3>
 
-<p>
-We run the solver on the file:
-</p>
+<p>We run the solver on the file:</p>
 
 <pre class="term"><code>$ ytra intro.smt2
     sat
-    ((define-fun x () Real 1.0))</code></pre>
+    ((define-fun x () Real 1.0))</code>
+</pre>
 
 <p>
-The solver answers <code>sat</code>. Because the instance contains <code>(get-model)</code>, the
-solver also returns a model: <i>x</i> = 1. This is indeed a solution, since
-sin(1)<sup>2</sup> &asymp; 0.708 &gt; 1/2 and exp(1) &asymp; 2.718 &lt; 3.
+  The solver returns <code>sat</code> and gives a model (<i>x</i> = 1) because the input contains <code>(get-model)</code>. This is a valid solution since 
+  sin(1)<sup>2</sup> &asymp; 0.708 &gt; 0.5 and 
+  exp(1) &asymp; 2.718 &lt; 3.
 </p>
 
 <h3>An unsatisfiable formula</h3>
 
 <p>
-The exponential function lies above its tangent line at 0, so the constraint
-exp(<i>x</i>) &lt; 1 + <i>x</i> has no solution (<a href="examples/exp-tangent.smt2">exp-tangent.smt2</a>):
+  Running the solver on exp(<i>x</i>) &lt; 1 + <i>x</i> returns <code>unsat</code>
+  (<a href="examples/exp-tangent.smt2">exp-tangent.smt2</a>):
 </p>
 
 <pre><code>(set-logic QF_TRA)
 (declare-fun x () Real)
 (assert (&lt; (exp x) (+ 1 x)))
-(check-sat)</code></pre>
+(check-sat)</code>
+</pre>
 
 <pre class="term"><code>$ ytra exp-tangent.smt2
-    unsat</code></pre>
+    unsat</code>
+</pre>
 
-<p>
-An <code>unsat</code> answer is a proof that the formula has no real solution.
-</p>
+<p>An <code>unsat</code> response means the formula has no real solution (in this case, because the exponential function lies above its tangents).</p>
 
 <h3 id="delta">A &delta;-satisfiable formula</h3>
 
 <p>
-The equation sin(<i>x</i>) = 1/2 has exactly one solution in the interval [0, 2], namely
-<i>x</i> = &pi;/6. This number is transcendental, whereas YicesTRA (for the moment!) only computes algebraic values. 
-It therefore cannot answer <code>sat</code> nor <code>unsat</code>.
-Run without options, the solver keeps approximating &pi;/6 to higher precisions until the time limit is reached
-(<a href="examples/sin-half.smt2">sin-half.smt2</a>):
+  The equation sin(<i>x</i>) = 1/2 has one solution in [0, 2]: <i>x</i> = &pi;/6.
+  Because &pi;/6 is transcendental and YicesTRA currently only computes algebraic numbers,
+  it cannot return <code>sat</code> or <code>unsat</code>. Without options, the solver keeps
+  refining its approximation of &pi;/6 indefinitely
+  (<a href="examples/sin-half.smt2">sin-half.smt2</a>):
 </p>
 
 <pre><code>(set-logic QF_TRA)
@@ -140,9 +142,9 @@ Run without options, the solver keeps approximating &pi;/6 to higher precisions 
 (get-model)</code></pre>
 
 <p>
-To obtain an answer, we fix a tolerance with the option <code>--mcsat-delta=D</code>, which sets
-&delta; = 2<sup>&minus;D</sup> and enables the third answer, <code>delta-sat</code>. Here we take
-D = 10, so that &delta; &asymp; 10<sup>&minus;3</sup>:
+  To get an answer, set a tolerance with the option <code>--mcsat-delta=D</code>,
+  where <i>D</i> is a positive integer that sets &delta; = 2<sup>&minus;D</sup> and enables
+  the <code>delta-sat</code> response. Taking <i>D</i> = 10 yields &delta; &asymp; 10<sup>&minus;3</sup>:
 </p>
 
 <pre class="term"><code>$ ytra --mcsat-delta=10 sin-half.smt2
@@ -150,13 +152,16 @@ D = 10, so that &delta; &asymp; 10<sup>&minus;3</sup>:
     ((define-fun x () Real (/ 36844988291815 70368744177664)))</code></pre>
 
 <p>
-The returned value <i>x</i> = 36844988291815 / 70368744177664 &asymp; 0.5235987755983018
-differs from &pi;/6 by less than 3&middot;10<sup>&minus;15</sup>. Formally, a <code>delta-sat</code> answer means that
-the assignment satisfies the <em>&delta;-weakening</em> of the formula, obtained by relaxing every
-atom that involves a transcendental function by &delta;. For instance, the &delta;-weakening of the atom
-sin(<i>x</i>) = 1/2 is |sin(<i>x</i>) &minus; 1/2| &le; &delta;. 
-Note, however, that YicesTRA does not internally relax any atomic formula, and in particular 
-it will never return <code>delta-sat</code> on an instance with no transcendental functions.
+  The returned value <i>x</i> &asymp; 0.5235987755983018
+  differs from &pi;/6 by less than 3&middot;10<sup>&minus;15</sup>.
+</p>
+<p>
+  Formally (see <a href="https://arxiv.org/abs/1204.3513">Gao, Avigad, and Clarke, 2012</a>), a <code>delta-sat</code> answer means the assignment satisfies
+  the <em>&delta;-weakening</em> of the formula, obtained by relaxing every atom involving a
+  transcendental function by &delta; (for instance, sin(<i>x</i>) = 1/2 becomes
+  |sin(<i>x</i>) &minus; 1/2| &le; &delta;). Note that YicesTRA does not internally relax formulas
+  and will never return <code>delta-sat</code> on formulas that 
+  do not feature transcendental functions.
 </p>
 
 <h2 id="usage">Usage</h2>
@@ -164,17 +169,8 @@ it will never return <code>delta-sat</code> on an instance with no transcendenta
 <h3>Input format</h3>
 
 <ul>
-  <li>The file must start with <code>(set-logic QF_TRA)</code>. This logic predefines the unary
-      functions <code>sin</code> and <code>exp</code> (of type Real &rarr; Real) and the constant <code>pi</code>. These functions must not be declared by the user.</li>
-  <li>The remaining constructs are those of SMT-LIB 2 for real arithmetic:
-      <code>declare-fun</code> and <code>declare-const</code> for variables of sort Real and Bool,
-      the arithmetic operations <code>+</code>, <code>-</code>, <code>*</code> and <code>/</code>,
-      the predicates <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>=</code>,
-      the Boolean connectives, <code>ite</code> and <code>let</code>, and the commands
-      <code>assert</code>, <code>check-sat</code>, <code>get-model</code> and <code>get-value</code>.</li>
-  <li>Rational constants can be written as decimals, such as <code>0.5</code>, or as fractions,
-      such as <code>(/ 1 2)</code>.</li>
-  <li> Other transcendental functions are not built in (for now!). Trigonometric functions can be expressed with <code>sin</code> and <code>pi</code>, for instance <code>(cos x)</code> can be written as <code>(sin (+ x (* (/ 1 2) pi)))</code>.</li>
+  <li><strong>Header.</strong> The file must start with <code>(set-logic QF_TRA)</code>, which predefines <code>pi : Real</code> and the functions <code>sin : Real &rarr; Real</code> and <code>exp : Real &rarr; Real</code>. Do not declare them.</li>
+  <li><strong>SMT-LIB 2 constructs.</strong> Supports standard real arithmetic constructs: variable declarations (<code>declare-fun</code>, <code>declare-const</code> for <code>Real</code> and <code>Bool</code>), operations (<code>+</code>, <code>-</code>, <code>*</code>, <code>/</code>), comparisons (<code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>=</code>), Boolean connectives, <code>ite</code>, <code>let</code>, and commands (<code>assert</code>, <code>check-sat</code>, <code>get-model</code>). Rational constants can be written as decimals or fractions (<code>0.5</code> or <code>(/ 1 2)</code>).</li>
 </ul>
 
 <h3>Command line</h3>
@@ -190,9 +186,9 @@ it will never return <code>delta-sat</code> on an instance with no transcendenta
       <td>Prints a model after every <code>sat</code> or <code>delta-sat</code> answer, without a
           <code>(get-model)</code> command in the input file.</td></tr>
   <tr><td><code>--mcsat-help</code></td>
-      <td>List options of the MCSAT engine.</td></tr>
+      <td>Lists options of the MCSAT engine.</td></tr>
   <tr><td><code>--help</code></td>
-      <td>List further options inherited from Yices.</td></tr>
+      <td>Lists further options inherited from Yices 2.</td></tr>
 </table>
 
 <h2 id="install">Installation</h2>
@@ -217,8 +213,8 @@ $ ./configure
 $ make</code></pre>
 
 <p>
-The binary is placed in <code>build/&lt;platform&gt;-release/bin/ytra</code>, for instance
-<code>build/x86_64-pc-linux-gnu-release/bin/ytra</code> on Linux. If <code>configure</code> does not find
+The binary is placed in <code>build/&lt;platform&gt;-release/bin/ytra</code> (for instance
+<code>build/x86_64-pc-linux-gnu-release/bin/ytra</code> on Linux). If <code>configure</code> does not find
 a library, pass its location with <code>CPPFLAGS</code> and <code>LDFLAGS</code>. The
 <a href="https://github.com/arith-lab/yices-tra#readme">README</a> on GitHub contains further troubleshooting notes.
 </p>
@@ -237,21 +233,16 @@ between the core MCSAT solver and the existing plugin for non-linear real arithm
 
 <h3>Non-total functions</h3>
 <p>
-    Unlike the version described in the paper, the implementation also supports non-total functions.
-    Currently, the only such function is division <code>/</code>, which is undefined when the denominator is zero.
-    The SMT-LIB standard specifies that <code>(/ t1 t2)</code> behaves as an uninterpreted function whenever <code>t2</code> is 0.
+  Unlike the version described in the paper, YicesTRA supports non-total functions; currently
+  just division (<code>/</code>), which is undefined when dividing by zero.
 </p>
 <p>
-    Respecting this semantics requires deciding whether a term is zero, which is a hard problem in transcendental arithmetic:
-    even for variable-free terms, no general decision procedure is known, and the known decidability results rely on Schanuel's conjecture.
-    YicesTRA therefore uses a <em>&delta;-relaxed semantics</em>. When evaluating <code>(/ t1 t2)</code>, if the tool cannot decide whether <code>t2 = 0</code>
-    using a precision that depends on &delta;, it treats <code>t2</code> as zero and allows any value for <code>(/ t1 t2)</code>.
-    If a solution is found under the &delta;-relaxed semantics, the tool reports <code>delta-sat</code> when <code>--mcsat-delta</code> is given,
-    and otherwise continues the search.
-</p>
-
-<p>
-  Under the &delta;-relaxed semantics, <code>sat</code> and <code>unsat</code> answers respects the SMT-LIB semantics.
+  Under SMT-LIB semantics, <code>(/ t1 t2)</code> acts as an uninterpreted function when <code>t2 = 0</code>.
+  Determining whether a transcendental expression equals zero is notoriously hard (dependent on Schanuel's conjecture).
+  YicesTRA therefore uses a <em>&delta;-relaxed semantics</em>: if it cannot determine whether <code>t2 = 0</code>
+  at a precision tied to &delta;, it treats <code>t2</code> as potentially zero and lets <code>(/ t1 t2)</code> take any value.
+  If a solution relies on this relaxation, YicesTRA reports <code>delta-sat</code> (when <code>--mcsat-delta</code> is set)
+  or continues searching. Crucially, <code>sat</code> and <code>unsat</code> answers still strictly respect SMT-LIB semantics.
 </p>
 
 <h2 id="paper">Paper</h2>
